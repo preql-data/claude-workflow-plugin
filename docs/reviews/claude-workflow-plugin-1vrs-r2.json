@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-1vrs",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "162c82e2b9a88ef66ba2b825a6b5280c201754057c7d386aa7bf9539e834cc53",
+  "risk_threshold": "medium",
+  "stop_condition": "R1-F1 is fixed in substance rather than in wording — the new index text is checked claim-by-claim against the actual test body, the diff is confirmed comment-only, the retired name is confirmed gone from live code, and the spec is re-run green — with no finding at or above medium remaining across the thirteen changed files.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "low",
+      "location": ".github/workflows/test.yml:596-601",
+      "evidence": "Unchanged from R1-F2 and deliberately not actioned this round. l1-doctor-bd-max runs workflow-doctor.test.sh directly with no STRICT_SECTIONS, so a future skip of META-TEST 8a/8b would leave the job green having validated nothing — and exercising 1.3.0:66 is the job's only reason to exist. Still mitigated and still measured: the skip notes are marker-shaped under run-tests.sh SECTION_SKIP_RE (:1386), so l1-unit's STRICT_SECTIONS=1 reddens the same skip at the 1.1.2 floor; and CI run 36458045072 job 109049318853 shows 8a control + 8a mutant + 8b control + 8b-i + 8b-ii all PASS on bd 1.3.0/dolt 2.3.5 (223 assertions). Re-confirmed locally this round at bd 1.3.0/dolt 2.3.0: all 13 8a/8b legs executed, zero skip markers, 228/228.",
+      "description": "Explicitly NOT a blocker, asked and answered: the coordinator asked whether it should block and it should not. The residual is narrow (a bd-1.3.0-SPECIFIC fixture failure), the omission of STRICT_SECTIONS is correctly reasoned for an unrelated cause (METATEST 4's mcp_bd leg genuinely skips without node), and the job is proven non-vacuous today on two independent toolchains. Follow-up, not a fix: assert 8a's and 8b's control lines appear in the captured output — a positive assertion over output the job already produces, not a new mechanism."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "low",
+      "location": ".claude/scripts/tests/model-roles.test.sh:3186-3190",
+      "evidence": "Unchanged from R1-F3 and deliberately not actioned. 11.5 and 11.6 evaluate the identical expression over the identical two variables (`$ISO_HASH_UNPROT_BEFORE` != `$ISO_HASH_UNPROT_AFTER`) and differ only in their echoed labels, so no input exists that makes one pass while the other fails. Both PASS on the real runner (CI run 36458045072, L1 job 109049319818) and in-container.",
+      "description": "NOT a blocker. Consequence is arithmetic only: one of the +4 assertions in the 452 -> 456 delta cannot independently fail, so the count overstates independent coverage by one. The underlying property 11.5/11.6 exist to establish is genuinely established — I proved it separately this cycle by mutation, contaminating the store 11.4 witnesses and watching 11.4 flip to FAIL. Follow-up: give 11.6 a distinct observable or fold it into 11.5."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "info",
+      "location": ".claude/scripts/workflow-doctor.sh:1482 (behaviour) / CHANGELOG.md [5.0.0]",
+      "evidence": "The 0cr6 half of 730759d arms a check that previously took a DISARMED branch on every target whose project directory is not literally named 'beads'. Installs on bd 1.2.1 or 1.2.2 that previously reported a silent PASS will now report 'bd-version-vs-schema DRIFT'. README.md documents the validated set and states plainly that the measured-but-unvalidated pairs FAIL; `grep -ic 'DOCTOR_BD_SCHEMA\\|we57\\|0cr6\\|l1-doctor-bd-max' CHANGELOG.md` returns 0.",
+      "description": "NOT a blocker and NOT a defect — the behaviour change is the fix working, and the user-facing surface (README) is already updated. Recorded as a pre-tag housekeeping item only: the [5.0.0] CHANGELOG section is dated 2026-09-18 and this wave lands after it, so folding a line in at tag time is the natural place. Raised because it is a user-visible change in a shipped diagnostic."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

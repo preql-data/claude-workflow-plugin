@@ -17,9 +17,11 @@
 #       prepends $FIXTURE/bin to PATH.
 #
 #   mk_bd_shim <fixture>
-#       Special-case: shim that delegates to the real `bd` with --no-daemon
-#       injected. Required because Beads' daemon-autostart can race on
-#       freshly-init'd tempdir DBs (same rationale as bd-github-link.test.sh).
+#       Special-case: shim that delegates straight to the real `bd`. It used to
+#       inject --no-daemon (bd 0.47.x raced daemon-autostart on freshly-init'd
+#       tempdir DBs); bd 1.1.2 removed both the flag and the daemon, so the
+#       wrapper is now a pass-through that exists purely so specs can PATH-shim
+#       and selectively override bd.
 #
 #   shim_log <fixture> <cmd>
 #       Echo the path to the recorded log for <cmd>. Convenience.
@@ -67,7 +69,7 @@ mk_shim() {
 
 mk_bd_shim() {
     # mk_bd_shim <fixture>
-    # Find the real bd, generate a wrapper that injects --no-daemon.
+    # Find the real bd, generate a pass-through wrapper for it.
     local fixture="$1"
     local bin
     bin=$(mk_shim_dir "$fixture")
@@ -100,10 +102,26 @@ mk_bd_shim() {
         return 1
     fi
 
+    # The wrapper used to inject --no-daemon (bd 0.47.x autostarted a background
+    # daemon that raced writes on freshly-init'd tempdir DBs). bd 1.1.2 REMOVED
+    # the flag and the daemon with it: `bd dolt status` reports "embedded
+    # (in-process, no server)", so every invocation is in-process against
+    # .beads/embeddeddolt and there is nothing to race. Keeping the flag was not
+    # merely inert — it broke every call, and in a way that does not look like a
+    # flag error: cobra treats an unknown flag as value-taking, so
+    # `bd --no-daemon show X --json` consumed `show` as the flag's value and
+    # failed with `unknown command "X" for "bd"`.
+    #
+    # The wrapper itself is still required: specs PATH-shim on it, and several
+    # replace it with a selective variant and then restore it. Those specs
+    # recover the real bd path by parsing the exec line below — anchored on
+    # `"$@"`, not on any flag, so a future bd flag change cannot silently
+    # reintroduce this.
     {
         printf '#!/bin/bash\n'
-        printf '# bd wrapper: --no-daemon to avoid daemon-autostart races in tempdirs.\n'
-        printf 'exec %q --no-daemon "$@"\n' "$real_bd"
+        printf '# bd wrapper for component tests. bd 1.1.x runs an in-process embedded\n'
+        printf '# Dolt engine, so there is no daemon to disable (--no-daemon: removed).\n'
+        printf 'exec %q "$@"\n' "$real_bd"
     } > "$script"
     chmod +x "$script"
     printf '%s' "$script"

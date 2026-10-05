@@ -1,0 +1,64 @@
+{
+  "contract_version": 1,
+  "task_id": "claude-workflow-plugin-xsu1",
+  "scope_label": "D4b full slice + 6im2 spec (two tasks sharing one working tree) - round 8 final verification",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "7b025066fb9602d3f2b1e4af6eb3d6738f6301a23cf545f679300cdddc7aaf36",
+  "reviewed_hash_basis": "sha256 over epic-gate.sh, qa-gate.sh, review-check.sh, plan-batches.test.sh, design-accessors.test.sh, design-artifact.test.sh, design-unit-bind-parity.test.sh, run-tests.sh, docs/HOOKS.md concatenated in that order; reproduced by the reviewer and independently by the orchestrator",
+  "scope_files": [".claude/scripts/epic-gate.sh", ".claude/scripts/qa-gate.sh", ".claude/scripts/review-check.sh", ".claude/scripts/tests/plan-batches.test.sh", ".claude/scripts/tests/design-accessors.test.sh", ".claude/scripts/tests/design-artifact.test.sh", ".claude/scripts/tests/design-unit-bind-parity.test.sh", ".claude/scripts/tests/run-tests.sh", "docs/HOOKS.md"],
+  "risk_threshold": "high",
+  "verdict": "findings",
+  "iterations": 8,
+  "stopped_by": "verdict",
+  "ship_recommendation": "do-not-ship",
+  "round7_fix_assessment": [
+    {"id": "R7-F1", "status": "fixed", "basis": "epic-gate.sh:1145-1157 refuses before ordering when a bound unit's dependency has no bound task; third why-token and sentinel present. Extraction at :1197-1217 prevents adoption of an unproduced schedule. Both-ends-bound ordering intact."},
+    {"id": "R7-F2", "status": "not_fixed", "basis": "Deliberately deferred to uopo. The three selectors still represent determined absence with rc-0 empty/{} bytes."},
+    {"id": "R7-F3", "status": "partially_fixed", "basis": "The partition and flattened-member checks exist and reject the cited empty probes. The new cardinality decision at :1943 is NOT failure-safe (sort's status masked without pipefail), and both gates still accept minimally adjusted wrong results. See R8-F2/R8-F3."},
+    {"id": "R7-F4", "status": "fixed", "basis": "validate_design_envelope_ok requires rc 0 before an exact nine-key type-checked boolean-ok:true envelope, used identically at :6994, :8095, :8640."},
+    {"id": "R7-F5", "status": "fixed", "basis": "review-check.sh:672-687 and qa-gate.sh:8881-8914 enforce exact per-subcommand shapes; unregistered subcommands select jq false."},
+    {"id": "R7-F6", "status": "fixed", "basis": "qa-gate.sh:8230-8250 captures flock status and exits 2 with design_binding_lock_unavailable before the read or add_comment."},
+    {"id": "R7-F7", "status": "fixed", "basis": "Shipped behaviour, control and fault-injection legs use canonical QG/RC; mutants and validator swaps target fixture paths incl. RC_FIX. No canonical-write path found."},
+    {"id": "R7-F8", "status": "fixed", "basis": "Header, usage, contract header and docs/HOOKS.md:2582 consistently state the two-shape rule."}
+  ],
+  "sixim2_fix_assessment": [
+    {"id": "S6-F1", "status": "fixed", "basis": "META-B has four carrier x flag cells, each with seven checks: presence, byte mutation with cmp rc=2 refusal mapping, landing, invocation survival, sibling survival, specific census failure, restore control."},
+    {"id": "S6-F2", "status": "partially_fixed", "basis": "The spec says application-state read-only and discloses the heredoc temp file, but run-tests.sh:329 still calls the same probe side-effect-free. See R8-F5."},
+    {"id": "S6-F3", "status": "partially_fixed", "basis": "Flags parsed from live .usage, regex-validated, hard-refused when empty, known flags as containment. But parse_required_flags is a non-pipefail printf|sed|awk pipeline. See R8-F4."}
+  ],
+  "findings": [
+    {"id": "R8-F1", "severity": "high", "location": ".claude/scripts/epic-gate.sh:1472", "disposition": "MUST-FIX in scope",
+     "description": "The validated design's unit_ids/unit_deps re-extractions still convert jq failure into []/{} . A unit_deps failure is detected only later as missing declarations, but _PB_DEGRADE_DEPS_JSON has already been published as {}, so the constructor can emit a lexical runnable order that ignores a known dependency. This is R7-F1's defect one level upstream: the constructor was closed, the data reaching it is still substitutable.",
+     "evidence": ":1472-1474 use `|| unit_ids_json=\"[]\"` and `|| unit_deps_json=\"{}\"`; :1479 publishes the substituted deps. The defensive gate at :1604-1621 degrades while passing all children; the constructor at :1149/:1165 then reads the empty deps map and can order T-A-DEPENDENT before T-Z-PREREQ.",
+     "suggested_fix": "Capture and test each re-extraction's rc and exact shape; if either cannot be extracted, refuse a runnable schedule by degrading without child ids (batches:[])."},
+    {"id": "R8-F2", "severity": "high", "location": ".claude/scripts/epic-gate.sh:1943", "disposition": "MUST-FIX in scope - INTRODUCED BY the round-7 fix for R7-F3(1)",
+     "description": "The new jq-free multiply-bound decision does not capture failure of the sort/grep pipeline. Without pipefail a failing sort passes duplicate lines through, grep counts the original cardinality and exits 0, and the duplicate branch is skipped. from_entries then silently drops one child and the clean plan can report parallel_safe:true.",
+     "evidence": "Orchestrator-reproduced: bound_units=(U1 U1) with a sort shim copying stdin and exiting 9 gives `entries=2 distinct_count=2 pipeline_rc=0` and the duplicate branch is skipped. epic-gate.sh sets `set -e` but not pipefail.",
+     "suggested_fix": "Make the complete pipeline status observable (scoped pipefail, or capture sort's output and status separately and count validated lines in a guarded second step). Add a paired sort-failure mutation leg."},
+    {"id": "R8-F3", "severity": "high", "location": ".claude/scripts/epic-gate.sh:2004", "disposition": "PARTIAL MUST-FIX: cross-validate against unit_task_map in scope; independent file-conflict and dependency-order re-validation DEFERRED",
+     "description": "The two round-7 gates reject only the exact cited empty probes, not semantically wrong successful results. The batching-input gate accepts all real bound units reclassified as unresolved; the batch-result gate accepts correct unit ids with forged task ids and no file-conflict or dependency-order check.",
+     "evidence": "Both current predicates returned true for `{r:[],unresolved:[\"U1\",\"U2\"],blocked:[],ud_r:{}}` against ids U1/U2, and for `{ok:true,batches:[[{unit_id:\"U1\",task_id:\"forged\"},{unit_id:\"U2\",task_id:\"forged\"}]]}` against R U1/U2. The first predicate receives no unit_task_map; the second validates only the unit_id multiset.",
+     "suggested_fix": "In scope: validate r/unresolved against unit_task_map, and validate batch members' task_id against unit_task_map. Deferred: independent file-conflict and dependency-order re-validation of the batching output, which is a second implementation of the algorithm under guard."},
+    {"id": "R8-F4", "severity": "medium", "location": ".claude/scripts/tests/design-unit-bind-parity.test.sh:249", "disposition": "MUST-FIX in scope - same class as R8-F2",
+     "description": "parse_required_flags claims failed preprocessing refuses, but its printf|sed|awk pipeline lacks pipefail. A failed or partial sed is accepted whenever awk emits a nonempty valid subset, so a newly added required flag can disappear while the containment assertions stay green - defeating S6-F3's purpose.",
+     "evidence": "A probe replacing sed with a pass-through returning 9 produced `parser_rc=0 output=--design-task,--unit-id`. The script enables only set -u.",
+     "suggested_fix": "Scoped pipefail or per-stage status checks. Add a self-test where the preprocessing stage emits a valid partial set and exits nonzero."},
+    {"id": "R8-F5", "severity": "low", "location": ".claude/scripts/tests/run-tests.sh:329", "disposition": "MUST-FIX in scope - one comment line",
+     "description": "The suite inventory still describes the no-argument design-unit-bind probe as side-effect-free, contradicting the corrected disclosure in the spec itself.",
+     "evidence": "run-tests.sh:328-330 says `live, read-only, side-effect-free call`; design-unit-bind-parity.test.sh:33-52 says application-state read-only and discloses the heredoc temp file.",
+     "suggested_fix": "Match the corrected wording and keep the heredoc/temp-file qualification."}
+  ],
+  "canonical_write_audit": {"any_leg_can_write_canonical": "no", "basis": "QG and RC are canonical read/execute sources only. All generated mutants redirect to fixture-local QG_MUT/RC_MUT paths; the only in-place validator shims write RC_FIX beneath the temporary fixture; canonical qa-gate resolves support scripts through CLAUDE_PROJECT_DIR."},
+  "vacuity_sweep": {
+    "legs_examined": 70,
+    "non_discriminating": [
+      {"leg": "plan-batches.test.sh 9s.4/9s.5", "why": "They prove the bash duplicate-cardinality decision survives a lying jq detail-namer, but never fail sort or grep, so they stay green if the distinct_rc refusal is ineffective."},
+      {"leg": "design-unit-bind-parity.test.sh parser self-tests", "why": "The invalid-token test exercises awk, the LAST pipeline stage. It cannot discriminate failure of the upstream sed stage, whose status is masked."}
+    ],
+    "4b_interaction_judgment": "narrows - making the forged fallback unit-id-multiset-consistent reduces what that fail-open mutant can smuggle and preserves a sharper same-file co-batching consequence; moving the marker to task_id does not weaken its discrimination. It also exposes the residual production weakness documented in R8-F3."
+  },
+  "systemic_context": "Round 8 established a SECOND systemic root cause, sibling to claude-workflow-plugin-uopo: no script sets pipefail (0 of 4) and there are 338 pipelines across epic-gate/qa-gate/review-check, every one masking upstream failure. Filed as claude-workflow-plugin-i8cx. The two causes are each other's escape hatch - the round-7 fix for R7-F3(1) escaped uopo's fail-open jq by rewriting the decision as a shell pipeline and landed directly in i8cx. This is the mechanical reason the same defect family reappeared after every fix round.",
+  "notes": "Bound hash reproduced exactly. bash -n passed for all seven shell files in scope. No prohibited suite, spec or runner was executed. emit_json and emit_error_json are byte-identical to HEAD (function hashes cd95a906... and fd22241f...). The deliberately untouched `.ok // false` reads remain at qa-gate.sh:5707 and :5974. R8-F2 was independently reproduced by the orchestrator before this artifact was recorded."
+}

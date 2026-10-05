@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-pqnd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "380688e68e7b2449ff433d6977f5aaf7d989c3273b62cbb752961c17871e82c5",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the seven-state enumeration has been checked once for a prose-emitting branch in no state and for states that render identically, and the matrix premise has been checked once for a path by which operator prose bypasses the pinned block entirely; then either a finding at or above high, or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. make lint stays 0, the spec stays 149/0, sections 1-3.3 stay at 99, and the anti-overreach outcomes must not move.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:7237",
+      "evidence": "The matrix renderer sources only the sentinel-wrapped LABEL-WITHOUT-RECORD-BLOCK ending at line 7227. The immediately following REVIEW_DISCIPLINE_BLOCKED branch has a separate operator-facing emit_block at line 7237 and is never sourced or executed by M1-M7. Adding the already-proved denylist evasion, such as \"This provenance-authenticated record can only be produced by qa-gate.sh approve,\" to that valid block string reaches an operator whenever REVIEW_DISCIPLINE_BLOCKED=true, while moving none of the seven hashes and matching none of BANNED_CLAIM_PATTERN's five alternatives.",
+      "description": "Operator prose can bypass the pinned block entirely through another real emit site. The rendered-output matrix therefore does not replace the defeated contributor-completeness mechanism for the task's broader promise that operator-facing text cannot regress to an equivalent false security claim; the existing phrase diagnostic also misses this concrete wording, so the 149-assertion spec can remain green while the overclaim ships."
+    }
+  ],
+  "iterations": 4,
+  "stopped_by": "verdict"
+}

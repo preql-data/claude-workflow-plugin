@@ -12,6 +12,22 @@
 # single one-line model-select: <message> entry under workflow_warnings,
 # so the operator still sees the outcome without re-deriving it.
 #
+# claude-workflow-plugin-j7kk (B2, R4-F1 ruling): --check was added to that
+# call. Filed defect: the unconditional write rewrote four TRACKED files
+# (three agent .md + settings.json, one shared mtime) mid an OPEN, UNRELATED
+# change set, with no files_changed list naming them — an approval covering
+# the rest of that change set would have attested to bytes no specialist
+# wrote and no reviewer read. --check runs the identical resolution and
+# reports any drift between the config and the applied pins LOUDLY, in the
+# one model-select: line below, but writes nothing; the write path
+# (`model-select.sh apply`, no --check) is reachable only by an explicit,
+# deliberate invocation, same as /workflow-model already is for a single
+# role. See claude-workflow-plugin-twyv for why the drift ALSO has to be
+# loud rather than merely non-writing: a config/frontmatter disagreement
+# that surfaces nowhere is indistinguishable from one that was never
+# checked, which is exactly the gap the auto-write had been silently
+# papering over.
+#
 # v4.1 C0c (claude-workflow-plugin-20e): THIS HOOK NO LONGER HAS AN EXIT PATH
 # THAT LOSES THE WORKFLOW CONTEXT. It always emits a valid
 # {"hookSpecificOutput": {"hookEventName": "SessionStart", ...}} envelope and
@@ -247,8 +263,9 @@ $DEGRADED_LOSSES
 
     bash .claude/scripts/workflow-doctor.sh
 
-Eleven functional checks -- the SessionStart envelope, both MCP servers, both
-gate hooks -- each with its own fix: line.
+Thirteen functional checks -- the SessionStart envelope, both MCP servers,
+both gate hooks, the Beads ledger, per-role model pin agreement -- each with
+its own fix: line.
 </workflow_degraded>
 "
 fi
@@ -270,7 +287,161 @@ QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
 SYNC_ERROR_LOG="$QA_TRACKING_DIR/sync-errors.log"
 mkdir -p "$QA_TRACKING_DIR"
 rm -f "$QA_TRACKING_DIR/approved" 2>/dev/null || true
-rm -f "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null || true
+
+# THE ACTIVE-CYCLE READ, hoisted so ONE answer serves BOTH decisions.
+#
+# Two blocks in this hook turn on the same question — "is a review cycle in
+# flight?": the tracker-preserve guard immediately below, and the gate-baseline
+# capture further down (search `baseline-capture --by session-start`; its own
+# comment has said "ONLY WHEN NO REVIEW CYCLE IS ACTIVE" since 3mg.1). They used
+# to be answered independently, and they MUST NOT be: two reads can disagree
+# inside one run, and the disagreement that matters is "tracker preserved, and
+# then the work it names baselined as pre-existing" — the exact pairing 94d.1 is
+# about. One resolution, one answer, both blocks read this variable.
+#
+# AND THE READ FALLS BACK TO THE STATE FILE (claude-workflow-plugin-94d.1.1).
+#
+# The probe used to be `[ -f "$SS_SCRIPT_DIR/current-task.sh" ]` alone — a test
+# for the sibling HELPER SCRIPT, not for the fact. QA reproduced the cost: state
+# file says a cycle is in flight, helper moved aside, `SS_ACTIVE_TASK` empty,
+# tracker DESTROYED, silently, with a valid envelope — and the gate-baseline
+# capture below wrong in the same direction on the same read.
+#
+# THE IRONY IS THE POINT, and it is worth keeping written down: the paragraph
+# above rejects a bd LABEL predicate precisely because it would make a decision
+# about a LOCAL FILE depend on an external dependency. The shipped probe then
+# kept a dependency of the same class — on a sibling script — for a fact this
+# hook can read directly. QA's framing was "your own preserve-when-the-read-fails
+# rule, applied to the read that shipped."
+#
+# WHY THE FALLBACK IS TO THE STATE FILE rather than a "preserve when the probe is
+# impossible" flag. There is ONE hoisted answer here serving TWO consumers, and
+# that is deliberate (see above). A preserve-flag would have to be honoured by
+# both, or it re-opens the exact asymmetry this hoisting closed — tracker
+# preserved, and then the work it names baselined as pre-existing. Reading the
+# fact makes the ONE variable correct and both consumers correct with it, and it
+# is not a new predicate: `qa-gate.sh reconcile_tracker` reads this same file
+# directly, `write_current_task` writes it directly when the helper is absent, and
+# `verify-before-stop.sh get_current_task` already has this exact helper-then-file
+# shape. Copying a shipped read beats inventing a fourth one.
+#
+# THE FALLBACK IS ON EMPTINESS, not on the helper's absence, so it also covers a
+# helper that is present but broken (bad shebang, non-zero exit, truncated by a
+# partial sync). Those fail the same way — no id — and reading the file is
+# strictly more evidence than not reading it. When the helper DOES answer, its
+# answer wins, so a future schema change in `current-task.sh get` still governs.
+SS_SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || SS_SCRIPT_DIR=""
+SS_ACTIVE_TASK=""
+if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
+    SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
+fi
+# STATE-FILE-FALLBACK BEGIN (94d.1.1)
+# The fallback itself, in a sentinel region so a mutation META can measure it
+# (QA finding R7-F3: it shipped with legs 8.6/8.6b as its only guard — strong
+# legs, but nothing proved they were SENSITIVE to this read, and a behavioural
+# leg whose sensitivity is unproven is the shape the harness exists to reject).
+# Stripping this region yields the PRE-94d.1.1 read exactly: the helper probe and
+# the `SS_ACTIVE_TASK=""` default both live OUTSIDE it, so the stripped copy is
+# coherent and simply goes blind whenever the sibling helper is unreadable —
+# byte-for-byte the state QA reproduced. Do not rename the sentinels.
+if [ -z "$SS_ACTIVE_TASK" ] && [ -s "$QA_TRACKING_DIR/current-task" ]; then
+    SS_ACTIVE_TASK=$(head -1 "$QA_TRACKING_DIR/current-task" 2>/dev/null | tr -d '\r\n[:space:]' || echo "")
+fi
+# STATE-FILE-FALLBACK END (94d.1.1)
+
+# TRACKER-PRESERVE BEGIN (94d.1)
+# DO NOT DESTROY THE CHANGE SET OF A GATE CYCLE THAT IS STILL IN FLIGHT.
+#
+# WHAT THIS HOOK USED TO DO, AND WHAT IT COST (reproduced live 2026-08-04 on
+# this repo's own 94d review, and again in an isolated repo before this guard was
+# written). The `rm -f` below was UNCONDITIONAL. SessionStart fires on `startup`,
+# `resume`, `clear` AND `compact` — so a conversation that compacted mid-review
+# deleted changed-files.txt out from under the review that was reading it: 26
+# paths -> 0, after which `qa-gate.sh enter`'s reconcile_tracker rebuilt 10 of
+# them from `git status` minus a 159-entry gate baseline. Every step reported
+# ok:true. change_set_hash moved 01296db9... -> 0b5a546e... and nothing anywhere
+# said 16 paths had gone. QA reached the same state independently from the other
+# side of the same review: 60 git-visible, 29 byte-identical to the baseline, 21
+# denylisted, 10 recovered.
+#
+# WHY THE RECONCILER IS NOT THE ANSWER, and why prevention has to live here.
+# reconcile_tracker can only ever produce a SUBSET of a lost tracker, for a
+# reason no refinement of it can fix: it derives its paths from `git status`, and
+# two of the 16 lost paths were invisible to git at all — one whose content had
+# been reverted (dirty in the tracker's history, clean on disk) and one gate
+# artifact under .claude/.qa-tracking/, which the shared self-written rule keeps
+# out of the change set by design. No baseline fix, no `comm` refinement and no
+# subtraction accounting can recover those two. A rebuild is a guess with a
+# plausible shape; not deleting the file is the only thing that keeps the
+# evidence.
+#
+# THE PREDICATE IS THE ONE THE GATE-BASELINE BLOCK ALREADY USES: `current-task`
+# names a task. Deliberately IDENTICAL, not merely similar — this hook's
+# `baseline-capture --by session-start` call has skipped on exactly that
+# condition since 3mg.1, with the fail-closed reasoning already written out
+# there, and the `rm` was the one outlier that ignored it. Two consequences of
+# copying it rather than inventing a second predicate:
+#   - The asymmetry cannot be "restored" by a later editor who sees two
+#     different tests for one question and normalises the wrong way.
+#   - No conjunction with a bd LABEL read. An earlier draft of this guard
+#     required qa-gate-entered/qa-pending as well, and that draft was WORSE in
+#     two measurable ways. It made SessionStart depend on bd + jq + a `bd show`
+#     round-trip for a decision about a local file (this hook's whole v4.1 C0c
+#     contract is that a degraded install still works), and — the real defect —
+#     it re-introduced the asymmetry from the other end: current-task set with
+#     no gate label would have SKIPPED the baseline capture (loose predicate)
+#     while DELETING the tracker (strict predicate), which is the 94d.1 state
+#     reached by a different route.
+#
+# THE STICKINESS COST, named rather than discovered later. `approve` clears
+# current-task; `block` deliberately does not (a block/fix loop is one cycle).
+# So a session that dies mid-cycle leaves the id set, and this guard then
+# preserves the tracker across every later session until something clears it —
+# feeding a dead cycle's paths into the change-set hash of unrelated work. That
+# is OVER-reporting: it blocks a Stop until someone looks, which is recoverable
+# (`current-task.sh clear`, or the next approve). Under-reporting certifies a
+# subset of what shipped, which is not. It is also not a NEW exposure: the
+# gate-baseline block has carried the identical stickiness since 3mg.1. Warning
+# 7 below is what makes it visible instead of silent.
+#
+# NEVER BLOCKS AND NEVER FAILS. The read above is `|| `-guarded and this block
+# only compares strings; the hook still emits its envelope and exits 0 whatever
+# happens. Nothing here writes sync-errors.log, deliberately: that log is
+# snapshotted-and-truncated a few lines BELOW this point, so a line written here
+# would be consumed in the same run and re-reported as "Last session logged a
+# Beads sync error" (the fkm.1.1 mislabelling). Warning 7 is in-band, so it
+# reaches the model in the session that has to act on it.
+SS_TRACKER_KEEP=0
+SS_TRACKER_STATE="no-cycle"
+SS_TRACKER_PATHS=0
+if [ -s "$QA_TRACKING_DIR/changed-files.txt" ]; then
+    SS_TRACKER_PATHS=$(grep -c . "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null | tr -d '[:space:]') || SS_TRACKER_PATHS=0
+    [ -n "$SS_TRACKER_PATHS" ] || SS_TRACKER_PATHS=0
+fi
+if [ -n "$SS_ACTIVE_TASK" ]; then
+    SS_TRACKER_KEEP=1
+    SS_TRACKER_STATE="preserved-cycle-in-flight"
+fi
+# TRACKER-PRESERVE END (94d.1)
+
+# The delete itself lives OUTSIDE the sentinels, and its guard reads
+# `${SS_TRACKER_KEEP:-0}` rather than a bare `$SS_TRACKER_KEEP`, for one
+# deliberate reason: with the region above excised the variable is UNSET, the
+# default is 0, and this becomes the unconditional `rm -f` that shipped before
+# 94d.1 — byte-for-byte the pre-fix behaviour. That is what makes the
+# strip-META in session-lifecycle.sh section 8 measure the guard rather than a
+# syntax error, and it is the same construction post-edit.sh uses for
+# _PE_RESOLVED at its SECOND-CHANCE region. Consequence, named rather than
+# left implicit: a future edit that loses the region defaults to DELETING, not
+# preserving. That is the pre-94d.1 status quo rather than a new hazard, and the
+# META is what notices.
+if [ "${SS_TRACKER_KEEP:-0}" != "1" ]; then
+    rm -f "$QA_TRACKING_DIR/changed-files.txt" 2>/dev/null || true
+fi
+# edit-count is NOT preserved with it, and that is not an oversight: its only
+# consumer is post-edit.sh's every-10-edits "Progress: N files edited" comment.
+# It carries no evidence about WHICH paths changed, so nothing downstream can
+# certify less because it reset.
 rm -f "$QA_TRACKING_DIR/edit-count" 2>/dev/null || true
 
 # B11 surface: capture (and clear) any sync errors from the prior session
@@ -308,10 +479,21 @@ fi
 # cycle is in flight and its work is (by construction) dirty right now;
 # baselining it would mark that work pre-existing and release it unreviewed.
 # In that case we write nothing and the cycle stays gated — the fail-closed
-# direction. (This hook also clears changed-files.txt above, so an in-flight
-# cycle resumed in a new session runs on the git fallback with whatever
-# baseline the cycle already had: every path dirtied since then reads as new.
-# Correct, if noisy.)
+# direction.
+#
+# The parenthesis that used to close this paragraph described the OTHER half of
+# a state this hook no longer produces, and it is corrected here rather than
+# deleted because it named the hazard accurately (94d.1). It read: "This hook
+# also clears changed-files.txt above, so an in-flight cycle resumed in a new
+# session runs on the git fallback with whatever baseline the cycle already had:
+# every path dirtied since then reads as new. Correct, if noisy." Two things
+# were wrong with it. The clearing is no longer unconditional — the
+# TRACKER-PRESERVE region above keeps the tracker for exactly the case this
+# block skips, on the SAME `current-task` predicate, which is why the two now
+# read one hoisted variable instead of two independent probes. And "correct, if
+# noisy" was the opposite of what happened: once reconcile_tracker existed, the
+# resumed cycle did not read as noisy-but-complete, it read as a smaller,
+# well-formed change set (26 paths -> 10) with every step reporting ok:true.
 #
 # Runs AFTER the B11 truncate above on purpose: a failure logged here belongs
 # to THIS session and should surface at the NEXT SessionStart, not be consumed
@@ -339,12 +521,12 @@ fi
 # enforcement surface still standing, so weakening it is the wrong direction.
 # .claude/tests/component/specs/installer-target-functional.sh section 6c pins
 # this: a degraded run must still leave .claude/.qa-tracking/gate-baseline.
-SS_SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd) || SS_SCRIPT_DIR=""
+# SS_SCRIPT_DIR and SS_ACTIVE_TASK are resolved ONCE, up at the QA-tracking
+# reset (see "THE ACTIVE-CYCLE READ, hoisted"), because the tracker-preserve
+# guard there turns on the same `current-task` question this block does. Reading
+# it a second time here would let one run answer it twice — and the disagreement
+# that matters is "tracker preserved, work then baselined as pre-existing".
 if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/qa-gate.sh" ]; then
-    SS_ACTIVE_TASK=""
-    if [ -f "$SS_SCRIPT_DIR/current-task.sh" ]; then
-        SS_ACTIVE_TASK=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/current-task.sh" get 2>/dev/null || echo "")
-    fi
     if [ -z "$SS_ACTIVE_TASK" ]; then
         CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_SCRIPT_DIR/qa-gate.sh" \
             baseline-capture --by session-start >/dev/null 2>&1 \
@@ -352,6 +534,52 @@ if [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_SCRIPT_DIR/qa-gate.sh" ]; then
                 "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
                 "gate-baseline capture failed; the Stop gate will treat pre-existing git dirt as new work this session" \
                 >> "$SYNC_ERROR_LOG" 2>/dev/null || true
+    fi
+fi
+
+# Ledger-divergence DETECTION (bd 1.1.2 / claude-workflow-plugin-fkm.1.1).
+#
+# DETECT AND WARN ONLY. This block used to run `beads-ledger.sh refresh`, which
+# rewrote .beads/issues.jsonl whenever the classifier judged the database the
+# safe side. That single idea produced FIVE defects — direction-blindness,
+# unmodeled differences falling through to the destructive branch, a rule-order
+# short-circuit, and finally comment-COUNT evidence being blind to comment-SET
+# divergence — each found only after the previous fix shipped. Every one was an
+# evidence rule whose claim was weaker than the safety property it authorised.
+#
+# So the automatic write is GONE, not strengthened again. Detection stays and
+# gets louder; repair is an explicit operator action
+# (`beads-ledger.sh reconcile --apply`). The earlier reasoning here — that a
+# warning "loses to a git commit -am" — was true and is now simply outweighed:
+# a warning that is occasionally ignored is recoverable, and a destructive
+# automatic write on a state we mis-classified is not.
+#
+# COST: one `bd export` (~0.5s) for the comparison. See beads-ledger.sh's
+# header for why no cheaper predicate is honest (`bd sql` is unsupported in
+# embedded mode; mtime/count proxies are wrong rather than imprecise).
+#
+# GATED ON BD_AVAILABLE, unlike the gate-baseline block above. That one is
+# deliberately ungated because it is git-only and still does useful work with bd
+# absent; this one INHERENTLY needs bd, so in a degraded session it could only
+# ever report "undetermined" — and writing that to sync-errors.log every single
+# session would turn a known, already-reported degradation into recurring noise.
+# installer-target-functional.sh 6c pins exactly that: a degraded run captures
+# the gate baseline AND logs no sync error.
+#
+# FAIL OPEN, like every other block here: nothing it observes blocks the session.
+SS_LEDGER_STATUS=""
+SS_LEDGER_SH="$SS_SCRIPT_DIR/beads-ledger.sh"
+if [ "$BD_AVAILABLE" = "1" ] && [ -n "$SS_SCRIPT_DIR" ] && [ -f "$SS_LEDGER_SH" ] && [ -d "$PROJECT_DIR/.beads" ]; then
+    # `check` is READ-ONLY and is the only ledger subcommand any hook may call.
+    SS_LEDGER_JSON=$(CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$SS_LEDGER_SH" check --json 2>/dev/null || true)
+    if [ -n "$SS_LEDGER_JSON" ] && command -v jq >/dev/null 2>&1; then
+        SS_LEDGER_STATUS=$(printf '%s' "$SS_LEDGER_JSON" | jq -r '.status // empty' 2>/dev/null || echo "")
+    fi
+    if [ "$SS_LEDGER_STATUS" = "failed" ] || [ "$SS_LEDGER_STATUS" = "undetermined" ]; then
+        printf '%s\t[session-start]\t%s\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo '?')" \
+            "Beads ledger check returned '$SS_LEDGER_STATUS'; .beads/issues.jsonl may not match the database" \
+            >> "$SYNC_ERROR_LOG" 2>/dev/null || true
     fi
 fi
 
@@ -388,14 +616,14 @@ MODEL_SELECT_SH="$PROJECT_DIR/.claude/scripts/model-select.sh"
 MODEL_SELECT_MSG=""
 if [ -x "$MODEL_SELECT_SH" ]; then
     if command -v timeout >/dev/null 2>&1; then
-        MODEL_SELECT_STDERR=$(timeout 8 bash "$MODEL_SELECT_SH" apply --quiet 2>&1 >/dev/null || true)
+        MODEL_SELECT_STDERR=$(timeout 8 bash "$MODEL_SELECT_SH" apply --quiet --check 2>&1 >/dev/null || true)
     elif command -v gtimeout >/dev/null 2>&1; then
-        MODEL_SELECT_STDERR=$(gtimeout 8 bash "$MODEL_SELECT_SH" apply --quiet 2>&1 >/dev/null || true)
+        MODEL_SELECT_STDERR=$(gtimeout 8 bash "$MODEL_SELECT_SH" apply --quiet --check 2>&1 >/dev/null || true)
     else
         # No external timeout available (typical macOS without coreutils).
         # The helper bounds curl internally at --max-time 5, so the worst
         # case is bounded by jq + ranking parse + bd-call latency.
-        MODEL_SELECT_STDERR=$(bash "$MODEL_SELECT_SH" apply --quiet 2>&1 >/dev/null || true)
+        MODEL_SELECT_STDERR=$(bash "$MODEL_SELECT_SH" apply --quiet --check 2>&1 >/dev/null || true)
     fi
     # The helper logs informationals to stderr prefixed with "model-select:";
     # keep the most recent line so a chain of warnings collapses to one.
@@ -456,12 +684,37 @@ if [ -n "$MODEL_SELECT_MSG" ]; then
 - $MODEL_SELECT_MSG"
 fi
 
-# Warning 3: surface a prior session's bd sync failure (B11). The log was
+# Warning 3: surface a prior session's Beads write failure (B11). The log was
 # already truncated above so this fires once per failure event.
+#
+# Wording note (fkm.1.1): this said "bd sync failed" until bd 1.1.2 removed
+# `bd sync`. It was never accurate anyway — sync-errors.log is the shared
+# failure log for every bd write in the workflow (qa-gate.sh's log_sync_error
+# appends `bd comments add` failures to it too), so naming one command
+# mislabelled the rest. It now names the LOG, which is what the operator has to
+# open. The file keeps its name: renaming it would churn the installer manifest
+# and every consumer for no gain.
 if [ -n "$SYNC_ERROR_LINE" ]; then
     SYNC_TS=$(printf '%s' "$SYNC_ERROR_LINE" | awk -F'\t' '{print $1}')
     WARNINGS+="
-- Last session's bd sync failed at ${SYNC_TS:-an unknown time}; see .claude/.qa-tracking/sync-errors.log"
+- Last session logged a Beads sync error at ${SYNC_TS:-an unknown time}; see .claude/.qa-tracking/sync-errors.log"
+fi
+
+# Warning 3b: the ledger is BEHIND the database (fkm.1.1 / R4-F1). Nothing was
+# repaired — this hook detects and reports, it does not write. The likeliest
+# cause is a previous session that ended without running SessionEnd.
+if [ "$SS_LEDGER_STATUS" = "stale" ]; then
+    WARNINGS+="
+- .beads/issues.jsonl is BEHIND the local Beads database: the database carries issues the ledger does not, so a fresh clone would recover an out-of-date set. NOTHING WAS CHANGED — repairing the ledger is a deliberate action. Run: bash .claude/scripts/beads-ledger.sh reconcile --apply   (then commit .beads/issues.jsonl)"
+fi
+
+# Warning 3c: the ledger is AHEAD, or the direction cannot be established.
+# Both mean the same thing to the operator: do NOT run a one-way export here,
+# because it deletes whatever only the ledger has. `reconcile --apply` keeps
+# both sides, which is why it is the only command named.
+if [ "$SS_LEDGER_STATUS" = "ledger-ahead" ] || [ "$SS_LEDGER_STATUS" = "indeterminate" ]; then
+    WARNINGS+="
+- .beads/issues.jsonl and the local Beads database DIVERGE, and the ledger holds records the database does not (a fresh clone, or this machine after a git pull). NOTHING WAS CHANGED. Do NOT run 'beads-ledger.sh export' — it is one-way and would delete them. Run: bash .claude/scripts/beads-ledger.sh reconcile --apply   (imports, then re-exports the union)"
 fi
 
 # Warning 4: effort floor + A/B verdict reconciliation (v4.0.0 V0 / cnz.1).
@@ -546,6 +799,86 @@ if [ -n "$SWEEP_REPORT_LINE" ]; then
     SWEEP_MSG=$(printf '%s' "$SWEEP_REPORT_LINE" | awk -F'\t' '{print $2}')
     WARNINGS+="
 - worktree-sweep at ${SWEEP_TS:-an unknown time}: ${SWEEP_MSG:-removable worktrees were found under .claude/worktrees/}"
+fi
+
+# Warning 7: the change-set tracker was CARRIED OVER rather than reset (94d.1).
+#
+# This is the correct outcome, not a fault — but it is the outcome nobody could
+# see before, and invisibility is what made 94d.1 expensive. The pre-94d.1 hook
+# destroyed the tracker at every session boundary; whoever resumed a review then
+# read a smaller, well-formed change set with nothing anywhere saying it had
+# shrunk. So the PRESERVE says so, out loud, with the count, in the session that
+# has to act on it.
+#
+# It also carries the recovery for the stickiness the guard's header names: an
+# id that never got cleared pins the tracker open, and this line is where an
+# operator finds out that is what is happening.
+if [ "$SS_TRACKER_STATE" = "preserved-cycle-in-flight" ]; then
+    WARNINGS+="
+- change-set tracker CARRIED OVER (94d.1): a review cycle is in flight on '$SS_ACTIVE_TASK', so .claude/.qa-tracking/changed-files.txt was NOT reset and still holds $SS_TRACKER_PATHS path(s) from before this session boundary. That is deliberate — the tracker is what change_set_hash is computed over, and rebuilding it from 'git status' can only ever recover a SUBSET (a reverted-content file and the gate's own artifacts are invisible to git). If that cycle is actually finished, clear it: bash .claude/scripts/current-task.sh clear"
+fi
+
+# Warnings 8-10: the three v5.0.0 Phase D0 model-role notices.
+#
+# THESE DELIBERATELY DO NOT RIDE model-select.sh's `_warn`. Warning 2 above
+# keeps only the LAST line matching '^model-select:' (`| tail -1`), which
+# collapses a chain of helper diagnostics into one outcome line — correct for
+# what it was built for, and fatal for anything new: a loud warning added to
+# the helper is swallowed by whatever the helper says afterwards. So each new
+# notice RIDES THE RESOLVED ARTIFACT (or its own state file) and is read from
+# disk here, where it gets its own line and cannot be shadowed.
+#
+# All three are fail-open and read-only: no jq, no artifact, or an unparseable
+# artifact means no warning, never a bad one.
+SS_ROLES_ARTIFACT="$QA_TRACKING_DIR/model-roles-resolved.json"
+SS_DRIFT_FILE="$QA_TRACKING_DIR/session-model-drift.json"
+
+if command -v jq >/dev/null 2>&1; then
+    # Warning 8: the live session model is not the resolved orchestrator model.
+    #
+    # The comparison itself CANNOT happen here — the session model appears only
+    # in the statusline's stdin envelope and this hook never reads stdin — so
+    # statusline.sh performs it and persists the result. What happens here is
+    # RE-VALIDATION: a record whose `expected` no longer matches the current
+    # artifact is stale (the artifact moved since it was written, e.g. a new
+    # model was adopted), and reporting a stale expectation would send the
+    # operator to the wrong /model command. Only a record that still agrees
+    # with the artifact is surfaced, and it is surfaced with the fix verbatim.
+    if [ -f "$SS_DRIFT_FILE" ] && [ -f "$SS_ROLES_ARTIFACT" ]; then
+        SS_DRIFT_EXPECTED=$(jq -r '.expected // empty' "$SS_DRIFT_FILE" 2>/dev/null || echo "")
+        SS_DRIFT_LIVE=$(jq -r '.live // empty' "$SS_DRIFT_FILE" 2>/dev/null || echo "")
+        SS_ORCH_NOW=$(jq -r '.roles.orchestrator // empty' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo "")
+        if [ -n "$SS_DRIFT_EXPECTED" ] && [ "$SS_DRIFT_EXPECTED" = "$SS_ORCH_NOW" ]; then
+            WARNINGS+="
+- session-model drift: the root session is the ORCHESTRATOR seat, but it last rendered on '${SS_DRIFT_LIVE:-<unknown>}' while the orchestrator role class resolves to '$SS_DRIFT_EXPECTED'. Never blocking. Fix: /model $SS_DRIFT_EXPECTED  (or relaunch via: make session)"
+        fi
+    fi
+
+    if [ -f "$SS_ROLES_ARTIFACT" ]; then
+        # Warning 9: designer and design_reviewer collapsed to one identity.
+        # Reported, never blocked (decision 3) — a block would make the
+        # Codex-absent arm unrunnable. On a stock install without Codex both
+        # lanes are `top`, so this is EXPECTED to be lit; the line therefore
+        # leads with the clearances rather than with alarm.
+        if [ "$(jq -r '.identity_collapse // false' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo false)" = "true" ]; then
+            SS_DESIGNER_ID=$(jq -r '.roles.designer // "?"' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo "?")
+            WARNINGS+="
+- design identity collapse: designer and design_reviewer both resolve to '$SS_DESIGNER_ID' on the claude design lane, so a design would be reviewed by its own model identity. Not a block — pins are written and the workflow runs. ONE clearance: set design_reviewer=<family>-class in .claude/model-roles. Do NOT install Codex expecting it to help — no script drives design review through Codex, so it only moves the lane off 'claude' and silences this warning while both roles still resolve to the same model (claude-workflow-plugin-yvpe)."
+        fi
+
+        # Warning 10: config keys this install's .claude/model-roles lacks.
+        #
+        # .claude/model-roles is manifest class `operator`, so an install whose
+        # copy was EDITED gets the v5 defaults as a `.claude/model-roles.new`
+        # SIDECAR and keeps running its old key set. Every missing key fails
+        # OPEN (missing == `top`), so without this line the install silently
+        # runs a v4 role map under a v5 workflow — no error, no symptom.
+        SS_MISSING_KEYS=$(jq -r '(.missing_keys // []) | join(", ")' "$SS_ROLES_ARTIFACT" 2>/dev/null || echo "")
+        if [ -n "$SS_MISSING_KEYS" ]; then
+            WARNINGS+="
+- .claude/model-roles is missing key(s): $SS_MISSING_KEYS. Each one falls back to 'top', so nothing errors and nothing is visible without this line. If .claude/model-roles.new exists, your copy was customised and the upgrade wrote the new defaults beside it rather than over it — merge the missing keys across."
+        fi
+    fi
 fi
 
 # 1. Get bd prime output (Beads' built-in agent context).

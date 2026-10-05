@@ -94,18 +94,34 @@ cmd_add() {
         >> "$DEBT_FILE"
 
     local bd_task_id=""
+    local bd_dep_linked=false
     if [ "$make_bd_task" = true ] && command -v bd >/dev/null 2>&1 && [ -d "$PROJECT_DIR/.beads" ]; then
         local active=""
         if [ -x "$CURRENT_TASK_HELPER" ]; then
             active=$(bash "$CURRENT_TASK_HELPER" get 2>/dev/null || echo "")
         fi
-        local -a deps_args=()
-        [ -n "$active" ] && deps_args=(--deps "blocks:$active")
         # bd create returns json with --json. Title is the description.
         local title="Tech-debt ($severity): $description"
         # Best-effort: capture id, fall back silently on parse failure.
-        bd_task_id=$(bd create "$title" -t task -p 2 "${deps_args[@]}" --json 2>/dev/null \
+        #
+        # NO `--deps` (claude-workflow-plugin-fkm.1.1). bd 1.1.2 still accepts
+        # the flag — it is in `bd create --help` — and records the edge
+        # INVERTED: `--deps blocks:$active` yields "$active is blocked by the
+        # new task" instead of the reverse. This used to pass that flag and then
+        # report "created with blocks dependency on the active task", which on
+        # 1.1.2 was not merely false but backwards — it made the active task
+        # look blocked by its own tech-debt follow-up. The edge is now added
+        # explicitly and the claim below is conditional on it having worked.
+        #
+        # Explicit is also version-independent: on bd 0.47.x the flag DOES work,
+        # so keeping it as a first attempt would record every edge twice.
+        bd_task_id=$(bd create "$title" -t task -p 2 --json 2>/dev/null \
             | jq -r '.id // empty' 2>/dev/null || echo "")
+        if [ -n "$bd_task_id" ] && [ -n "$active" ]; then
+            if bd dep add "$bd_task_id" "$active" >/dev/null 2>&1; then
+                bd_dep_linked=true
+            fi
+        fi
     fi
 
     jq -n \
@@ -115,12 +131,15 @@ cmd_add() {
         --arg desc "$description" \
         --arg added "$now" \
         --arg bd "$bd_task_id" \
+        --arg linked "$bd_dep_linked" \
         --arg debt_file "$DEBT_FILE" \
         '{ok:true, subcommand:"add", row:{severity:$sev, "file:line":$fl, effort:$eff,
                                           description:$desc, added:$added},
           bd_task_id:(if $bd == "" then null else $bd end),
           debt_file:$debt_file,
-          observations: (if $bd == "" then "Row appended; no Beads task created." else "Row appended; Beads task " + $bd + " created with blocks dependency on the active task." end)}'
+          observations: (if $bd == "" then "Row appended; no Beads task created."
+                         elif $linked == "true" then "Row appended; Beads task " + $bd + " created with blocks dependency on the active task."
+                         else "Row appended; Beads task " + $bd + " created, but NO blocks dependency was recorded (no active task, or `bd dep add` failed)." end)}'
 }
 
 cmd_list() {

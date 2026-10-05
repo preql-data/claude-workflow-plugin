@@ -5,7 +5,7 @@ argument-hint: [--skip <check,check>] [--json-out <file>]
 
 # /workflow-doctor
 
-Run the eleven functional health checks over this project's install. Every
+Run the thirteen functional health checks over this project's install. Every
 check either EXECUTES the thing or reads a contract a broken install cannot
 satisfy — the presence-only assertions live in the installer specs, and
 presence is exactly what let "both MCP servers dead" and "no workflow context
@@ -25,26 +25,42 @@ by indented `fix:` lines that are meant to be run as-is. Exit 0 = all
 non-skipped checks passed, 1 = at least one failed, 2 = usage error.
 
 The check names are a stable contract (`deps`, `agents`, `skill`,
-`mcp_config`, `settings_hooks`, `beads`, `session_start`, `mcp_bd`,
-`mcp_code_graph`, `gate_pretooluse`, `gate_stop`). `--skip` rejects an unknown
-name rather than ignoring it.
+`mcp_config`, `settings_hooks`, `beads`, `beads_ledger`, `model_parity`,
+`session_start`, `mcp_bd`, `mcp_code_graph`, `gate_pretooluse`, `gate_stop`).
+`--skip` rejects an unknown name rather than ignoring it.
 
 ## Notes for Claude
 
-- Safe to run mid-session. Every dynamic check EXCEPT `beads` runs against a
+- Safe to run mid-session. Every dynamic check EXCEPT `beads` and `beads_ledger` runs against a
   throwaway copy of the project, so the operator's QA approval, changed-files
   tracker, gate baseline and agent `model:` pins are never touched. Do NOT
   "optimise" this by invoking `session-start.sh` or `verify-before-stop.sh`
   directly — those mutate gate state.
+- A `SKIP` on `model_parity` with an UNVERIFIABLE:NO-DATA detail usually
+  means this target's model-select cache has never been populated (no
+  ANTHROPIC_API_KEY ever set) — a normal, often-permanent state, not a
+  broken install. It self-skips on its own (never a silent PASS, never a
+  FAIL over a missing key); `--skip model_parity` is unnecessary but
+  harmless if the operator wants it silenced anyway, or run
+  `model-select.sh resolve` first if the operator does have a key and wants
+  the check to actually run (`status` only READS an existing cache — it
+  cannot populate a cold one; `resolve` or `apply` can). A `FAIL` with an
+  UNVERIFIABLE:HELPER-FAILURE detail is different in kind, not degree: the
+  role/agent map helper itself is broken or truncated, and the fix: lines
+  name the actual command to run and read, not a cache to populate.
 - The one exception, stated precisely because the operator may ask: `beads` runs
   `bd doctor` against the REAL target on purpose (a sandboxed copy would be
   checking a database the workflow does not use). It changes no issue data and
-  never touches `issues.jsonl`, but opening the SQLite database in WAL mode
-  creates/rewrites `.beads/beads.db-shm` and `.beads/beads.db-wal`, and a
-  checkpoint rewrites `.beads/beads.db`. Measured on a 6,936-file target: those
-  three files are the ONLY things a full run modifies anywhere, and a run with
-  `--skip beads` modifies nothing at all. Use `--skip beads` if the user needs a
-  run that provably touches nothing.
+  never touches `issues.jsonl` — but it is NOT side-effect free, and the
+  mechanism depends on which bd the target has. On bd 0.47.x the SQLite store is
+  opened in WAL mode and a checkpoint rewrites `.beads/beads.db` plus its `-wal`
+  and `-shm` siblings. On bd 1.1.2 and 1.3.0 those files do not exist; there the
+  schema read creates `.dolt/stats/` when absent. A full inventory is
+  deliberately NOT listed: every prose version has gone stale against the code
+  (the one that stood here until 2026-10-02 gave only the WAL case,
+  unconditionally). See claude-workflow-plugin-tfzm and -44yh. Nothing it
+  touches enters git. If the user needs a run that provably touches nothing, use
+  `--skip beads`: it skips both the `bd doctor` call and the schema read.
 - `--skip mcp_bd,mcp_code_graph` is the right move on a host with no node; add
   `beads` on an air-gapped host (`bd doctor` performs a GitHub release check and
   can otherwise blow the 30s bound and report a false FAIL).

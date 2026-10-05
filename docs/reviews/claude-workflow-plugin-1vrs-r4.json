@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-1vrs",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "6c0a707d9fdc2cc6d01877c40ac4444c29ce2173ec84dfb0b1f1d861aaffbef5",
+  "risk_threshold": "medium",
+  "stop_condition": "UNION SCOPE (orchestrator widened this review to include commit 430fe99 / g47z): every claim 430fe99 makes is verified at source or by execution rather than inherited from its author's account, its spec is RUN, the observed delta is attributed to the change rather than to the environment, and no finding at or above medium remains across the sixteen-entry change set.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "low",
+      "location": ".claude/tests/component/specs/review-artifact-durability.sh:466-477 (Leg C RESTORE)",
+      "evidence": "NOT ATTRIBUTABLE TO 430fe99 AND NOT A BLOCKER — recorded because it is the one thing in this review that did not reproduce as claimed, and silence about it would misrepresent how completely the claim was verified. The commit claims `bash .claude/tests/component/run.sh --filter review-artifact-durability` under BD_SHIM_ONLY=1 goes pass=40 fail=1 rc=1 -> pass=41 fail=0 rc=0. In cwp-l1-repro:full (-u 1000:1000, BD_SHIM_ONLY=1, en_US.UTF-8, and separately re-run with CI's exact GIT_CONFIG_GLOBAL identity step) I measured pass=38 fail=3 -> pass=39 fail=2 instead. The two extra failures are 'Leg C RESTORE: the canonical path DOES enter the tracker (step 5, green)' (expected 1, actual 0) and 'Leg C RESTORE: precondition — approve succeeds'. ATTRIBUTION IS NEVERTHELESS CLEAN AND MEASURED: `diff` of the FAIL-line sets before (752270c) and after (430fe99) removes EXACTLY one line, 'Leg A / AC-3: ...and says so by name', and changes nothing else — the two Leg C failures are present IDENTICALLY in both trees, so they are pre-existing and independent of this change. And they do not occur on the release gate: CI run 36458045072 job 109049319338 (L2, a8e9827) shows all three 'Leg C RESTORE' assertions PASS and AC-3 as the SOLE failure, with that job's own `__SPEC_SUMMARY__ pass=40 fail=1` matching the commit's before-number exactly. Instrumented the cause rather than guessing: the checkpoint commit at :467-468 that exists to defeat this very failure DID run and DID succeed (rc=0, measured by surfacing the rc the `>/dev/null 2>&1 || true` normally swallows), yet the fresh artifact still never entered the tracker — the tracker at the assertion held only `src/c-restore.ts`, and the canonical path `/tmp/component-fixture.*/docs/reviews/*-r1.json` was absent. That is the 94d.1 baseline-vs-raw-porcelain-line interaction the spec's own :449-465 comment describes and claims to have fixed.",
+      "description": "So the commit's DELTA claim is true and reproduced; its ABSOLUTE before/after numbers are true on the runner (verified from the job log) but not reproducible in a CI-matched container. The residual is that Leg C RESTORE carries an environment-sensitive assumption about how git collapses a wholly-untracked directory in porcelain output relative to a previously-captured baseline — the same class as the 12.47e finding from round 1: an assertion whose outcome depends on the environment, where single-run evidence should not be read as deterministic. Worth its own task alongside d73j rather than blocking this approval: the change set is green on the gate that governs the release, and nothing in this wave or in 430fe99 causes it."
+    },
+    {
+      "id": "R4-F2",
+      "severity": "low",
+      "location": "carried forward, unchanged and deliberately not actioned: .github/workflows/test.yml:596-601 (l1-doctor-bd-max lacks STRICT_SECTIONS); .claude/scripts/tests/model-roles.test.sh:3186-3190 (11.6 re-tests 11.5's predicate); CHANGELOG.md [5.0.0] (no line for the workflow-doctor behaviour change)",
+      "evidence": "All three were raised in r2, the orchestrator asked whether any should block, and my answer was and remains no. Evidence unchanged: the bd-max job is proven non-vacuous on two toolchains (CI job 109049318853 at bd 1.3.0/dolt 2.3.5, and locally at bd 1.3.0/dolt 2.3.0 with all 13 8a/8b legs executed) and its skip notes are marker-shaped so l1-unit's STRICT_SECTIONS=1 reddens them at the floor; 11.6's duplication is arithmetic only and the underlying property is independently proven by my own 11.4 contamination mutation; the CHANGELOG item is pre-tag housekeeping with the user-facing surface (README) already correct.",
+      "description": "Recorded so the approval does not silently drop them. None blocks."
+    },
+    {
+      "id": "R4-F3",
+      "severity": "info",
+      "location": ".claude/tests/component/specs/review-artifact-durability.sh AC-3 sibling assert_not_contains (~:289) — already filed as claude-workflow-plugin-d73j",
+      "evidence": "Independently confirmed at source rather than taken on trust: `review_file_binding_obs` is assigned at qa-gate.sh:7752/7754/7758/7763/7765 and consumed at EXACTLY ONE place, the SUCCESS summary at :7960. So both AC-3 needles — the one 430fe99 replaced and the `review-artifact binding VERIFIED` one its sibling assert_not_contains still uses — can only ever appear on a path this scenario no longer reaches, since k6re's check at qa-gate.sh:6773 emits and `exit 4`s first (confirmed: `git log -S review_artifact_unrecorded` returns exactly one commit, fa30d05).",
+      "description": "The specialist filed this rather than sweeping it, which is the right call, and scoping it out kept 430fe99 surgical. Noting only that it should be reviewed alongside g47z rather than inherited silently, and that the 7765 'CHANGED since recorded' arm of the ladder itself may now be similarly unreachable — worth checking when d73j is picked up."
+    }
+  ],
+  "iterations": 4,
+  "stopped_by": "verdict"
+}

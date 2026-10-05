@@ -111,7 +111,7 @@ set -u
 #      offline machine — a network dependency in the component tier.
 #   2. workflow-doctor.sh, exiting 3 ("installed, verification FAILED") when a
 #      functional check does not pass. This spec's fixtures are not built to
-#      satisfy eleven functional checks, and every `install.sh exits 0`
+#      satisfy thirteen functional checks, and every `install.sh exits 0`
 #      assertion here would start reporting a fixture gap as an installer bug.
 # Both are covered for real by `make install-test`, which installs into a
 # tempdir and requires a fully green doctor — that is the surface that proves
@@ -145,7 +145,7 @@ cat > "$FAKE_BIN/bd" <<'FAKE_BD'
 # it case-insensitively and would print a spurious warning.
 case "${1:-}" in
     --version|-v|version)
-        printf 'bd 0.99.0 (fake-bd for installer specs)\n'
+        printf 'bd __FAKE_BD_VERSION__ (fake-bd for installer specs)\n'
         ;;
     init)
         printf 'fake-bd: initialized Beads workspace\n'
@@ -163,6 +163,18 @@ esac
 exit 0
 FAKE_BD
 chmod +x "$FAKE_BIN/bd"
+# THE FAKE REPORTS THE INSTALLER'S OWN FLOOR, read from the install.sh under
+# test. v5's install.sh REFUSES any bd below RECOMMENDED_BD_VERSION
+# (claude-workflow-plugin-wyt3; -ishe R5-F1), so the fixed 0.99.0 this fake
+# used to report would turn every install in this spec into a refusal.
+# Reading the value keeps the fake at the floor when the floor moves. A failed
+# read is a harness error rather than a fake that silently reports nothing.
+FAKE_BD_VERSION=$(sed -n 's/^RECOMMENDED_BD_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$PLUGIN_ROOT/install.sh" | head -1)
+[ -n "$FAKE_BD_VERSION" ] || { echo "HARNESS ERROR: no RECOMMENDED_BD_VERSION in $PLUGIN_ROOT/install.sh for the fake bd" >&2; exit 2; }
+sed "s/__FAKE_BD_VERSION__/$FAKE_BD_VERSION/" "$FAKE_BIN/bd" > "$FAKE_BIN/bd.tmp" \
+    && mv "$FAKE_BIN/bd.tmp" "$FAKE_BIN/bd" && chmod +x "$FAKE_BIN/bd"
+"$FAKE_BIN/bd" --version | grep -qF "bd $FAKE_BD_VERSION (fake-bd" \
+    || { echo "HARNESS ERROR: the fake bd does not report $FAKE_BD_VERSION" >&2; exit 2; }
 export PATH="$FAKE_BIN:$PATH"
 
 # --- helpers ----------------------------------------------------------------

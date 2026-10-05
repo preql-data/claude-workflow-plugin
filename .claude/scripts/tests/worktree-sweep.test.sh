@@ -252,6 +252,216 @@ assert_eq "META-1f: restore control — and reports exactly ONE removable, in sc
     "$(sweep_json | jq -r '"\(.removable) \([.candidates[]|select(.status=="REMOVABLE")|.path|split("/")|last]|join(","))"' 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
+# Section C — pipefail hardening (claude-workflow-plugin-i8cx, wave 2 group
+# C): resolve_task's `head -1 "$f" | tr -d '[:space:]'`. head is the fallible
+# producer; a failing head whose PARTIAL bytes tr still transforms
+# successfully used to be masked into whatever truncated text survived,
+# rather than the empty string the shape check downstream is built to
+# reject. `l1-tas` is a real, distinct, ALSO-closed bd task specifically so a
+# truncated prefix of `l1-task-closed` is not merely garbage but a
+# COINCIDENTALLY VALID, WRONG task id — the polarity that matters for a
+# script whose job is deciding what to delete: this is one of the two real
+# "delete MORE" hazards found in this file (the other being #D below); every
+# other masked pipe here was verified to fail toward KEEP (see the
+# completion report's polarity table). Per the pairing standard's explicit
+# demand for this file: the shipped-artifact leg asserts the WORKTREE ITSELF
+# still exists after a shimmed-failing read under --apply, not merely that
+# an error printed.
+# ---------------------------------------------------------------------------
+
+echo "--- C: resolve_task's head|tr masking (claude-workflow-plugin-i8cx) ---"
+
+# Extend the bd stub: l1-tas is a SECOND real closed task, distinct from
+# l1-task-closed but a legitimate 4-char truncation-prefix of it.
+cat > "$T/bin/bd" <<'STUB'
+#!/bin/bash
+ARGS="$*"
+case "$1" in
+    show)
+        case "$2" in
+            l1-task-closed) printf '%s\n' '{"status":"closed"}'; exit 0 ;;
+            l1-tas)         printf '%s\n' '{"status":"closed"}'; exit 0 ;;
+            *) printf 'unknown id in: %s\n' "$ARGS" >&2; exit 1 ;;
+        esac ;;
+esac
+exit 0
+STUB
+chmod +x "$T/bin/bd"
+
+REAL_HEAD=$(command -v head)
+mkdir -p "$T/head-shim-bin"
+# Armed per-worktree via a SUFFIX match (env var names the worktree's own
+# directory basename, e.g. "c-dryrun"), never a full-path match: `resolve_task`
+# receives `$SWEEP_CANON`, which is `canon`-resolved (`pwd -P`), and on macOS
+# that is the `/private/var/folders/...` spelling while `$T` (built from
+# `mktemp -d`) is the `/var/folders/...` one — the same physical-vs-logical
+# root gap this codebase documents repeatedly elsewhere. A suffix match on
+# the worktree's own name is immune to which spelling reaches the shim.
+# Prints the truncated-but-shape-valid id, THEN fails — simulating head
+# dying mid-write, not before writing anything (which was already the
+# non-masking case).
+cat > "$T/head-shim-bin/head" <<SHIMEOF
+#!/bin/bash
+for a in "\$@"; do
+    case "\$a" in
+        */worktrees/\${C_HEAD_SABOTAGE_NAME:-__none__}/.claude/.qa-tracking/current-task)
+            printf 'l1-tas\n'
+            exit 9
+            ;;
+    esac
+done
+exec ${REAL_HEAD} "\$@"
+SHIMEOF
+chmod +x "$T/head-shim-bin/head"
+
+# Two worktrees for now, otherwise identical to B's "inscope" fixture
+# (closed real task, old mtime): one shimmed+dry-run (shipped), one
+# shimmed+--apply (MUTANT, to prove the deletion). c-fix-apply (the THIRD,
+# for the shipped-script --apply restore control) is created LATER, AFTER
+# the mutant's --apply sweep below — an --apply run examines EVERY
+# worktree under .claude/worktrees/, not just the one path under test,
+# and both "inscope" (Section B) and "c-dryrun" are ALSO genuinely
+# removable (real closed task, old mtime) independent of any shim; creating
+# c-fix-apply up front would let the mutant's OWN unshimmed sweep remove it
+# too, for an unrelated reason, and falsely look like the fix failing.
+wt_add "$REPO/.claude/worktrees/c-dryrun"     l1-c-dryrun
+wt_add "$REPO/.claude/worktrees/c-mut-apply"  l1-c-mut-apply
+for w in c-dryrun c-mut-apply; do
+    mkdir -p "$REPO/.claude/worktrees/$w/.claude/.qa-tracking"
+    printf 'l1-task-closed\n' > "$REPO/.claude/worktrees/$w/.claude/.qa-tracking/current-task"
+    touch -t 202001010000 "$REPO/.claude/worktrees/$w"
+done
+
+C_SHIPPED_JSON=$(C_HEAD_SABOTAGE_NAME="c-dryrun" \
+    PATH="$T/head-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$SCRIPT" --json 2>/dev/null)
+assert_eq "C1 THE FIX: shipped script + shimmed head — worktree stays KEEP, never REMOVABLE" \
+    "KEEP" \
+    "$(printf '%s' "$C_SHIPPED_JSON" | jq -r '[.candidates[] | select(.path | endswith("/c-dryrun")) | .status][0] // "<absent>"' 2>/dev/null)"
+assert_eq "C2 ...naming the honest reason (no-task-id), never the coincidental wrong id" \
+    "no-task-id" "$(reason_of "$C_SHIPPED_JSON" c-dryrun)"
+
+# MUTANT: revert resolve_task's scoped-pipefail fix to the pre-fix plain
+# pipe (targeted single-line sed substitution — the SAME technique
+# qa-gate-pipefail.test.sh's MUTANT A uses for an identical single-line
+# scoped-pipefail revert).
+MUT_HEAD="$T/worktree-sweep-mutA.sh"
+# shellcheck disable=SC2016  # literal sed pattern, deliberately unexpanded
+sed 's@seg=\$( set -o pipefail; head -1 "\$f" 2>/dev/null | tr -d '"'"'\[:space:\]'"'"' ) || seg=""@seg=$(head -1 "$f" 2>/dev/null | tr -d '"'"'[:space:]'"'"') || seg=""@' \
+    "$SCRIPT" > "$MUT_HEAD"
+chmod +x "$MUT_HEAD"
+assert_eq "C3 NON-VACUITY: mutant A landed (scoped pipefail removed from resolve_task, copy differs)" "1" \
+    "$(cmp -s "$SCRIPT" "$MUT_HEAD" && echo 0 || echo 1)"
+bash -n "$MUT_HEAD" 2>/dev/null
+assert_eq "C4 NON-VACUITY: the mutant still parses" "0" "$?"
+
+C_MUT_JSON=$(C_HEAD_SABOTAGE_NAME="c-mut-apply" \
+    PATH="$T/head-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$MUT_HEAD" --json 2>/dev/null)
+assert_eq "C5 SPECIFIC MISBEHAVIOUR: mutant A + shim reports REMOVABLE, task=l1-tas — the coincidental garbled match" \
+    "REMOVABLE|l1-tas" \
+    "$(printf '%s' "$C_MUT_JSON" | jq -r '[.candidates[] | select(.path | endswith("/c-mut-apply")) | (.status + "|" + .task)][0] // "<absent>"' 2>/dev/null)"
+
+# THE DELETION LEG (pairing standard, this file specifically): --apply,
+# same shim, same mutant — does the worktree actually disappear?
+C_MUT_APPLY_JSON=$(C_HEAD_SABOTAGE_NAME="c-mut-apply" \
+    PATH="$T/head-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$MUT_HEAD" --apply --json 2>/dev/null)
+assert_eq "C6 SPECIFIC MISBEHAVIOUR, THE DELETION: mutant A + shim + --apply actually REMOVES the worktree, keyed on a garbled task id" \
+    "yes" "$([ -d "$REPO/.claude/worktrees/c-mut-apply" ] && echo no || echo yes)"
+assert_eq "C6a ...the run's own report agrees: c-mut-apply is REMOVED, task recorded as the garbled l1-tas" \
+    "REMOVED|l1-tas" \
+    "$(printf '%s' "$C_MUT_APPLY_JSON" | jq -r '[.candidates[] | select(.path | endswith("/c-mut-apply")) | (.status + "|" + .task)][0] // "<absent>"' 2>/dev/null)"
+assert_eq "C6b ...and git's own admin state agrees it is gone" \
+    "0" "$(git -C "$REPO" worktree list --porcelain | grep -c 'worktrees/c-mut-apply$' || true)"
+
+# RESTORE CONTROL / THE FIX AT --apply: same shim, same scenario, SHIPPED
+# script — the worktree must SURVIVE. Created NOW, after the mutant's own
+# sweep above has already run its course, so it is the ONLY removable-
+# looking candidate this run can reach (inscope/c-dryrun/c-mut-apply were
+# already swept by C6's unrelated, genuine removals).
+wt_add "$REPO/.claude/worktrees/c-fix-apply" l1-c-fix-apply
+mkdir -p "$REPO/.claude/worktrees/c-fix-apply/.claude/.qa-tracking"
+printf 'l1-task-closed\n' > "$REPO/.claude/worktrees/c-fix-apply/.claude/.qa-tracking/current-task"
+touch -t 202001010000 "$REPO/.claude/worktrees/c-fix-apply"
+
+C_FIX_APPLY_JSON=$(C_HEAD_SABOTAGE_NAME="c-fix-apply" \
+    PATH="$T/head-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$SCRIPT" --apply --json 2>/dev/null)
+assert_eq "C7 THE FIX AT --apply: SHIPPED script + the SAME shim + --apply does NOT remove the worktree" \
+    "yes" "$([ -d "$REPO/.claude/worktrees/c-fix-apply" ] && echo yes || echo no)"
+assert_eq "C7b ...and this run's own removed-count is 0 (c-fix-apply is the only candidate left standing at this point)" \
+    "0" "$(printf '%s' "$C_FIX_APPLY_JSON" | jq -r '.removed' 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+# Section D — the candidate-enumeration process substitution
+# (`done < <(git worktree list --porcelain | sed ...)`). rc cannot cross a
+# `< <(...)` boundary at all, so no pipefail scope could ever have reached
+# this one; a failed `git worktree list` used to look EXACTLY like "no
+# worktrees exist" (Total: 0), the SAME numbers a genuinely clean state
+# produces. Polarity: SAFE (an enumeration failure means fewer things get
+# examined, never more get removed — CANDIDATES stays empty, so the removal
+# loop never runs at all), but still a silent false-"clean" report that
+# could hide an accumulating worktree problem indefinitely. The fix makes it
+# observable on stderr; it does not and cannot change the JSON envelope's
+# shape (documented residual — see the completion report).
+# ---------------------------------------------------------------------------
+
+echo "--- D: candidate-enumeration process substitution (claude-workflow-plugin-i8cx) ---"
+
+REAL_GIT_BIN=$(command -v git)
+mkdir -p "$T/git-shim-bin"
+cat > "$T/git-shim-bin/git" <<SHIMEOF
+#!/bin/bash
+case "\$*" in
+    *"worktree list"*) exit 9 ;;
+esac
+exec ${REAL_GIT_BIN} "\$@"
+SHIMEOF
+chmod +x "$T/git-shim-bin/git"
+
+D_SHIPPED_ERR=$(PATH="$T/git-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$SCRIPT" --json 2>&1 >/dev/null)
+assert_contains "D1 THE FIX: a failing 'git worktree list' is reported on stderr" \
+    "could not enumerate worktrees" "$D_SHIPPED_ERR"
+D_SHIPPED_JSON=$(PATH="$T/git-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$SCRIPT" --json 2>/dev/null)
+assert_eq "D2 ...and the JSON envelope still reports Total: 0 honestly (documented residual: JSON alone cannot distinguish failed-enumeration from genuinely-clean; the stderr line is what closes that gap for an interactive/manual run)" \
+    "0" "$(printf '%s' "$D_SHIPPED_JSON" | jq -r '.total' 2>/dev/null)"
+
+# MUTANT: revert to the pre-fix process substitution (targeted multi-line
+# awk block replacement, keyed on the fix's own unique WT_LIST_OUT
+# declaration through its closing `fi`).
+D_MUT="$T/worktree-sweep-mutD.sh"
+awk '
+    /^WT_LIST_OUT="" wt_list_rc=0$/ {
+        print "while IFS= read -r line; do"
+        print "    [ -n \"$line\" ] || continue"
+        print "    [ \"$(canon \"$line\")\" = \"$CURRENT_TOP\" ] && continue   # never ourselves"
+        print "    TOTAL=$((TOTAL + 1))"
+        print "    [ \"${#CANDIDATES[@]}\" -ge \"$SWEEP_MAX_CANDIDATES\" ] && continue"
+        print "    CANDIDATES+=(\"$line\")"
+        print "done < <(git -C \"$PROJECT_DIR\" worktree list --porcelain 2>/dev/null | sed -n '"'"'s/^worktree //p'"'"')"
+        skip = 1
+        next
+    }
+    skip && /^fi$/ { skip = 0; next }
+    skip { next }
+    { print }
+' "$SCRIPT" > "$D_MUT"
+chmod +x "$D_MUT"
+bash -n "$D_MUT" 2>/dev/null
+assert_eq "D3 NON-VACUITY: the mutant parses" "0" "$?"
+# shellcheck disable=SC2016  # literal needles, deliberately unexpanded
+assert_eq "D4 NON-VACUITY: the mutant lost the rc-checked enumeration and regained the bare process substitution" \
+    "0|1" "$(grep -cF 'WT_LIST_OUT=$( set -o pipefail' "$D_MUT")|$(grep -cF 'done < <(git -C "$PROJECT_DIR" worktree list' "$D_MUT")"
+
+D_MUT_ERR=$(PATH="$T/git-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$D_MUT" --json 2>&1 >/dev/null)
+assert_eq "D5 SPECIFIC MISBEHAVIOUR: the mutant + the SAME failing git prints NOTHING on stderr — the failure is completely invisible" \
+    "" "$D_MUT_ERR"
+D_MUT_JSON=$(PATH="$T/git-shim-bin:$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$D_MUT" --json 2>/dev/null)
+assert_eq "D6 ...while reporting the SAME Total: 0 as a genuinely clean run — indistinguishable without the stderr line" \
+    "0" "$(printf '%s' "$D_MUT_JSON" | jq -r '.total' 2>/dev/null)"
+
+D_MUT_RESTORE_ERR=$(PATH="$T/bin:$PATH" CLAUDE_PROJECT_DIR="$REPO" bash "$D_MUT" --json 2>&1 >/dev/null)
+assert_eq "D7 RESTORE CONTROL: even the mutant, unshimmed (real git), enumerates normally with no stderr noise" \
+    "" "$D_MUT_RESTORE_ERR"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 

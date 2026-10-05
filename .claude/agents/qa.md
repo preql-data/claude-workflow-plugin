@@ -5,7 +5,7 @@ tools: Read, Glob, Grep, LS, Bash, Write, Edit, MultiEdit, Task, WebFetch, WebSe
 # model: pinned to a static identifier. SessionStart resolves the best
 # available model and rewrites these pins via model-select.sh (spec 0.3);
 # /workflow-model remains the manual override path.
-model: claude-fable-5
+model: claude-opus-5
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. The session-level effort (launch wiring — `make session` /
 # `claude --effort` — or /effort) takes precedence per session; this
@@ -31,7 +31,7 @@ When the `Stop` hook (`verify-before-stop.sh`) fires, it runs technical checks (
 
 Block-reason shapes you may see and what to do with each:
 
-1. **Doc-only auto-approval (F1)** — when every changed file is a markdown/RST/text/LICENSE/CHANGELOG/docs path, the gate skips test/lint and auto-approves with the summary `"Auto-approved: doc-only changes detected (F1 fast path)"`. No QA action required; the iteration counter and tracking files are wiped.
+1. **Doc-only auto-approval (F1)** — when `is_doc_only_path` accepts every changed file, the gate skips test/lint and auto-approves with the summary `"Auto-approved: doc-only change-set detected (F1 fast path) — no reviewable source changed."`. No QA action required; the iteration counter and tracking files are wiped. **Read "doc-only" as whatever that function says and nothing else** — this line deliberately does not enumerate its arms, because the enumeration that used to sit here said "docs path" and stayed wrong for three rounds after `bbh` removed it. A documentation NAME is necessary and not sufficient: executable content is refused (`bbh`) and so is any path the project declares as its own surface (`s5qf`). Section 10's "Reconcile task state before you report" carries the detail and the residual; `docs/HOOKS.md` carries the full table.
 
 2. **Verification failed (J19 iterative loop)** — test, lint, or type-check failed. The block-reason includes:
    - The current iteration counter (e.g., "iteration 2 of 3").
@@ -54,6 +54,8 @@ Block-reason shapes you may see and what to do with each:
    You (the QA agent) read this and pick one — never the human. Pick `approve` only if your structured judgment of the diff says the failures are non-blocking; pick `tech-debt` for defer-with-record; pick `defer` only when you genuinely cannot proceed and need user direction.
 
    `choose approve` is **not** an unconditional escape. It delegates to the same `cmd_approve` a direct approve uses, so it still refuses (exit 4) while the task has no independent review artifact or an unresolved finding at/above `risk_threshold`. Escalation does not dissolve a dispute: the finding must be resolved with evidence (`qa-gate.sh resolve-finding`) or overruled by the orchestrator (`qa-gate.sh arbitrate … overrule`) first — see `orchestrator.md` section 5d.
+
+   Since v5 D2 it ALSO refuses (exit 2, one of the `design_*` error keys) while the task's design-satisfied precondition is unmet — and `choose` has no flag slot to forward a bypass reason through to `cmd_approve`, so on the ordinary task (no design phase at all: `no_design_attempted`) `choose approve` fails first-try with no way to clear it as written. Drop to the direct form instead: `bash .claude/scripts/qa-gate.sh approve <task> --no-design '<reason>' '<summary>'`. Note the `QA-GATE CHOICE approve` comment is written BEFORE the delegated `cmd_approve` call, so a refusal here — design or otherwise — leaves that comment on the task with nothing actually approved; read an unexplained `QA-GATE CHOICE approve` with no matching `QA-GATE APPROVED` record as exactly that, not as a forged approval.
 
 4. **QA approval required (technical checks passed, J18 intent payload)** — the gate ran tests/lint/type successfully and is now waiting on QA. The block-reason includes a JSON block:
    ```json
@@ -152,9 +154,9 @@ Before writing any test, ask:
 - [ ] Tests are deterministic (no flakiness).
 - [ ] Each new test was observed failing before the fix landed. If you didn't watch the test fail, you don't know if it tests the right thing — and neither did the specialist. You cannot replay their session, so check it structurally instead: does the assertion actually depend on the changed code? Would reverting the fix turn it red? A test that would stay green against the unfixed state is coverage theatre, and that is a `must_fix`, not a nitpick.
 - [ ] All tests pass.
-- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape). Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field.
+- [ ] The specialist returned all seven F7 fields — `task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage` (section 10 has the canonical shape), plus (v5 D5) `unit_id`, `design_hash`, `green_before`, `green_after`, `criteria_tests`. Read `llm_observations` and `context_coverage` for substance, not presence: a boilerplate one-liner, or a `context_coverage` naming sources the diff plainly does not depend on, is the same finding as an empty field. For the five v5 D5 fields, substance means: `green_before`/`green_after` reflect an ACTUAL `qa-gate.sh green-check` run (cross-check against the durable `GREEN-CHECK v1` comment on the task, not just the payload's own claim) rather than a hand-typed "green"; and, for a unit-bound task, that `criteria_tests`' mapping is a GENUINE match — the test named actually exercises the criterion's own behaviour, not merely a test that happens to touch the same file. `qa-gate.sh design-unit-align` already mechanically refuses an incomplete map, an unknown criterion id, or a reference that cannot be found on disk; what it cannot judge is whether a present, well-formed mapping is a HONEST one, which is exactly the class of question this checklist item exists to catch.
 
-That last item is the F7 contract's **only** claimed enforcement (`docs/AGENTS.md`, "Specialist Completion Contract (F7)"): the gate does not reject a payload with a field missing, so if you do not ask, nothing does. Through v4.0 the doc cited this checklist and the checklist did not carry the item — do not let it drift back out.
+Since P7 (`claude-workflow-plugin-qbhw`) this checklist item is no longer the contract's *only* enforcement — `review-check.sh validate-completion` rejects a payload missing or malformed on any of these fields at record time, and `qa-gate.sh approve` refuses without a recorded contract at all. What remains QA's alone, and is why this item stays on the checklist, is QUALITY: the validator accepts a well-shaped but hollow `llm_observations`, a `context_coverage` that names the wrong files, or a `green_before`/`green_after` that is well-formed but never actually checked against the durable record — none of that is a schema violation, and only a reader judges it. Through v4.0 the doc cited this checklist and the checklist did not carry the item at all — do not let it drift back to that state either.
 
 ### 3a. Regression impact scan (extends J19, code-graph)
 
@@ -193,7 +195,7 @@ Mandatory follow-up after the FIRST ACTION returns: for each high-fan-in caller 
 
 This step pairs with the orchestrator's pre-delegation impact pass (`.claude/agents/orchestrator.md` section 1a). The orchestrator scores impact against the *intended* change before delegating; QA scores impact against the *landed* diff before approving. Both are cheap (the index is warm after the orchestrator's first call) and both feed the same gate.
 
-**Keep your own scratch out of the change set.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad or under `.claude/.qa-tracking/`; both are already denylisted. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
+**Keep your own scratch out of the change set.** `post-edit.sh` records `tool_input.file_path` VERBATIM, so a probe you Write to an absolute path — `/tmp/enc-diff.sh`, a `mktemp -d` directory, anything outside the repo — enters `changed-files.txt`, the change-set hash, and the Stop gate, and can end up bound into an approval for a file that will not exist an hour later. Put throwaway probes in the harness session scratchpad, which IS denylisted (`^(/private)?/tmp/claude-[^/]+/`). Do NOT use `.claude/.qa-tracking/` for scratch: despite what this line used to say, it is NOT denylisted — post-edit.sh tracks it and anything you write there enters the change set, which is how a review artifact ended up as a tracked entry of its own change set. If a `mktemp -d` path does land in the tracker, do NOT quietly delete it mid-cycle — that changes the hash under whoever is reviewing — record it in `llm_observations` instead. Widening the denylist to cover `/tmp` generally is not the fix: it would also filter the test suite's own fixture paths out of their change sets (see `docs/HOOKS.md`, "The shared denylist").
 
 ## 4. Security review pass
 
@@ -336,20 +338,11 @@ But since V3 the artifact's EXISTENCE and INDEPENDENCE are mechanically enforced
 
 ### 6p.1 Assemble and validate the review request
 
-Write the request to `.claude/.qa-tracking/review-request-<task-id>.json`. Ten keys, all required by the validator:
+`qa-gate.sh review-request-build` assembles AND validates the request in one call — you no longer hand-roll the jq yourself. This replaced a hand-rolled recipe (claude-workflow-plugin-wuu8) that had three compounding defects on real packets: it never showed how `.diff` actually got populated (an unset `$DIFF` shell variable silently rendered as `""`, so at least one real review ran with zero bytes of the change); it embedded the impact report via `--arg impact "$(cat <path>)"`, which dies with `"argument list too long: jq"` on a real report (measured: 1.86MB) BEFORE the packet-budget cap is ever consulted, leaving an EMPTY request file nothing checked for; and even when assembly succeeded, that same impact report was embedded pretty-printed and double-encoded (escaped inside a JSON string), dominating the packet (measured: up to 98.5% of one real request) despite the underlying content rarely earning that much space. `review-request-build` fixes all three: `.diff` is git diff HEAD-vs-working-tree over the SAME denylist-filtered, canonical file list `change_set_hash` already covers (so a fixture mirror or a lockfile can never dominate it, and a brand-new untracked file is still included); the impact report is summarised into a small, honest object — omitted-with-reason (never a bare `{}`) when there's nothing useful to show; and every potentially-large field is read via `jq --rawfile`/`--slurpfile`, never through jq's own argument list, with an empty or invalid assembly refused rather than written.
 
 ```bash
 TID="$TASK_ID"
-REQ="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-request-$TID.json"
 REVIEW_ITERATION=1          # 1 on the first review pass; +1 per review round
-
-# risk_threshold — the severity at or above which a finding blocks. Default
-# comes from the ONE caps file; raise it (or lower it) when the diff's blast
-# radius warrants. Ordered enum: critical > high > medium > low > info.
-RISK=$(grep -E '^[[:space:]]*risk_threshold_default[[:space:]]*=' \
-    "$CLAUDE_PROJECT_DIR/.claude/review-config" 2>/dev/null \
-    | head -1 | cut -d= -f2 | tr -d '[:space:]')
-RISK="${RISK:-high}"
 
 # stop_condition — YOU write this, from the SPEC's acceptance criteria. It is
 # what "done reviewing" means for THIS task, e.g.
@@ -357,23 +350,29 @@ RISK="${RISK:-high}"
 #    critical/high finding remains in the auth or gate paths"
 STOP_CONDITION="<one sentence derived from the SPEC's acceptance criteria>"
 
-# change_set_hash — the SAME canonicalisation the approval record binds to.
-HASH=$(bash "$CLAUDE_PROJECT_DIR/.claude/scripts/impact-report.sh" --hash-only)
+# spec — write the SPEC text (already loaded via bd_doc_read per section 1)
+# to a file; review-request-build reads it via --rawfile, never through
+# jq's argument list, so a long SPEC cannot repeat the ARG_MAX failure
+# above.
+SPEC_FILE="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-spec-$TID.txt"
+printf '%s' "$SPEC_DOC" > "$SPEC_FILE"
 
-jq -n \
-    --arg tid "$TID" --argjson it "$REVIEW_ITERATION" \
-    --arg rt "$RISK" --arg sc "$STOP_CONDITION" --arg hash "$HASH" \
-    --arg spec "$SPEC_DOC" --arg diff "$DIFF" --arg cc "$F7_CONTRACT" \
-    --arg impact "$(cat "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/impact-report-$TID.json" 2>/dev/null)" \
-    '{contract_version:"1", task_id:$tid, iteration:$it,
-      risk_threshold:$rt, stop_condition:$sc, change_set_hash:$hash,
-      spec:$spec, diff:$diff, completion_contract:$cc,
-      impact_report:$impact}' > "$REQ"
-
-bash "$CLAUDE_PROJECT_DIR/.claude/scripts/review-check.sh" validate-request "$REQ"
+bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-request-build "$TID" \
+    --iteration "$REVIEW_ITERATION" \
+    --stop-condition "$STOP_CONDITION" \
+    --spec-file "$SPEC_FILE"
+    # --risk-threshold <sev>              optional; defaults to review-config's
+    #                                      own risk_threshold_default (built-in
+    #                                      default: high) — raise or lower it
+    #                                      when the diff's blast radius warrants.
+    #                                      Ordered enum: critical>high>medium>low>info.
+    # --completion-contract-file <path>   optional; defaults to the latest
+    #                                      recorded COMPLETION v1 payload for
+    #                                      $TID (found automatically — you
+    #                                      rarely need this flag).
 ```
 
-`validate-request` exits 0 with `{"ok":true,...}` or exits 4 with an `error_key` that NAMES the problem — `missing_key:<field>`, `missing_risk_threshold`, `missing_stop_condition`, `risk_threshold_invalid_enum`. Fix the named field and re-validate. Never hand an invalid request onward: the Codex driver rejects it with exit 4 and the round-trip is wasted.
+On success this prints `{"ok":true,...,"path":".../review-request-<task-id>.json","bytes":N,"diff_bytes":N,"impact_summary_bytes":N}` and exits 0 — the request is ALREADY validated (it runs the same `review-check.sh validate-request` internally before reporting success), written to `.claude/.qa-tracking/review-request-<task-id>.json` (the same path `codex-review.sh --request` and section 6p.2 below already expect), with the ten required keys all present. On failure it exits 1 (a usage error, or the assembled request failed its own schema validation) or 2 (an infra failure — hash unavailable, a file could not be staged/written, or assembly produced an empty/invalid request) and prints `{"ok":false,...,"error_key":"<name>",...}` with an `error_key` that NAMES the problem — `missing_key:<field>`, `missing_risk_threshold`, `missing_stop_condition`, `risk_threshold_invalid_enum`, `change_set_hash_unusable` (not 64 lowercase hex, or the SHA-256 empty-content sentinel — a genuinely empty or wholly-denylisted change set; see section 6p.2 below), `missing_completion_contract`, or `assembled_request_empty` (the assembly itself failed or produced nothing — a bug in the command, not something to retry with the same inputs). Fix the named field and re-run; `change_set_hash_unusable` on the sentinel specifically means there is nothing to review — use `qa-gate.sh approve --no-review '<reason>'` instead of retrying. Never hand an invalid request onward: the Codex driver rejects it with exit 4 and the round-trip is wasted.
 
 `risk_threshold` and `stop_condition` are the two mandatory-non-empty fields (v4 principle 4, bounded diligence). A reviewer without a blocking bar and a stopping rule loops; the validator refuses the request rather than letting that happen.
 
@@ -387,14 +386,15 @@ LANE="${LANE:-claude}"
 
 Treat ANY value other than the literal `codex` as `claude` — including a JSON parse failure, the `claude/no-flag` literal `status` prints when no detection has run yet, and a missing file. The probe is fail-open by design: absence, misconfiguration, crash, hang, and a server exposing no `codex` tool all resolve to `claude`.
 
-**Lane `claude` — you author the artifact, then record it.** Write it to `.claude/.qa-tracking/review-artifact-<task-id>-r<n>.json`:
+**Lane `claude` — you author the artifact, then record it.** You do not need to place it at any particular path yourself: compose the JSON below and pipe it to `review-record`, which derives the canonical location (`docs/reviews/<task-id>-r<n>.json` — claude-workflow-plugin-rqer, v5 D2) and writes it there for you. This is deliberate, not merely convenient — a durable, hashed file existing now depends on running a command you already had to run, not on a separate Write-tool step nothing downstream can verify happened (see the closing note on this lane, below):
 
 ```json
 {
   "contract_version": "1",
   "task_id": "<beads-id>",
   "reviewer_identity": "qa-claude",
-  "reviewer_model": "<your own pinned model, from this file's `model:` frontmatter>",
+  "reviewer_model": "<a RUNTIME SELF-REPORT — state the model you understand yourself to be running as right now, from your own awareness, NOT derived by re-reading this file's `model:` frontmatter a second time>",
+  "reviewer_pin": "<this file's OWN `model:` frontmatter line, read directly — the declared/expected value, kept separate from the self-report above>",
   "reviewed_hash": "<the change_set_hash from the request>",
   "risk_threshold": "<the request's risk_threshold>",
   "stop_condition": "<the request's stop_condition>",
@@ -413,17 +413,23 @@ Treat ANY value other than the literal `codex` as `claude` — including a JSON 
 }
 ```
 
-Finding ids follow the grammar `R<review-iteration>-F<n>` (`R1-F1`, `R1-F2`, ...). `verdict` is `approve` only when nothing at or above `risk_threshold` remains; anything else is `findings`. The grammar-bearing scalars (`task_id`, `reviewer_identity`, `reviewer_model`, `reviewed_hash`, `risk_threshold`, `verdict`, `stopped_by`, and each finding's `id`/`severity`) must be single-line — an embedded newline splits the one-line record comment downstream and the validator rejects it (`scalar_contains_control_char`). Free-form prose in `location`/`evidence`/`description` may span lines.
+**`reviewer_model` vs `reviewer_pin` (claude-workflow-plugin-46w9) — do not fill both from the same source.** `reviewer_pin` is a mechanical fact: this file's own `model:` frontmatter line, read verbatim. `reviewer_model` is a claim about what actually ran THIS turn, and the only source for that claim is your own awareness of your identity — restating the frontmatter is not evidence of it, and measured practice shows the two can diverge with no config change in between (this file's pin has been `claude-fable-5` since 2026-07-25; ledger records exist of a qa spawn whose review was actually performed by a different model, e.g. `claude-opus-5[1m]`, recorded honestly rather than papered over with the pin). Filling `reviewer_model` from the frontmatter — the previous instruction here — makes the field state config, not evidence, which is exactly backwards for a field whose entire purpose is to let a later analysis compare the two and see whether they agree. Both fields use the SAME character class: letters, digits, `.`, `-`, `:`, `/`, `[`, `]` — reject anything else rather than guessing at a sanitised value, and if your own model id does not fit that class, say so in `llm_observations` rather than silently truncating it.
+
+Finding ids follow the grammar `R<review-iteration>-F<n>` (`R1-F1`, `R1-F2`, ...). `verdict` is `approve` only when nothing at or above `risk_threshold` remains; anything else is `findings`. The grammar-bearing scalars (`task_id`, `reviewer_identity`, `reviewer_model`, `reviewer_pin`, `reviewed_hash`, `risk_threshold`, `verdict`, `stopped_by`, and each finding's `id`/`severity`) must be single-line — an embedded newline splits the one-line record comment downstream and the validator rejects it (`scalar_contains_control_char`). Free-form prose in `location`/`evidence`/`description` may span lines.
+
+**`reviewed_hash` and `task_id` are refused, not merely validated, if you copy them wrong (claude-workflow-plugin-wob2).** `reviewed_hash` must be exactly 64 lowercase hex characters — copy `change_set_hash` from the request VERBATIM, including case; `review-record` refuses anything else as `reviewed_hash_unusable` (case is not normalised, deliberately, so a case mismatch reports as evidence that you did not actually copy the value you were handed, rather than being silently corrected). **If the request's `change_set_hash` is itself the SHA-256 empty-content sentinel (`e3b0c442...`) — a genuinely empty change set, or one whose every entry is denylisted — do not author a review artifact at all; you will not reach this section anyway, because `validate-request` now refuses that sentinel too (`change_set_hash_unusable`), before you ever assemble the request.** ("Doc-only" is a different concept — verify-before-stop.sh's F1 fast path, `is_doc_only_path` — and does not produce this sentinel: a change set of real documents still hashes to a real digest and reviews normally.) The audited path for a genuinely degenerate change set is `qa-gate.sh approve --no-review '<reason>'`, not a review cycle over nothing. Likewise, `task_id` in the artifact must equal the task you are recording under — `review-record` refuses a mismatch (`artifact_task_id_mismatch`) rather than binding an approval to the wrong task's change set, and `risk_threshold` must rank in the same `critical > high > medium > low > info` enum the request itself uses (`risk_threshold_invalid_enum`).
 
 Bounded diligence applies to this lane too, from the same `.claude/review-config`: report at most `max_findings` (most severe first; on truncation set `stopped_by: "cap:max_findings"`), and do not run a review iteration above `max_review_iterations` (stop and say so rather than looping).
 
+**A `cap:*` `stopped_by` means the review is incomplete by construction — never treat it as a completed pass on its own (claude-workflow-plugin-nq5f).** `stopped_by: "cap:max_findings"`, `"cap:max_review_iterations"`, and `"cap:timeout"` all mean the review ran out of TURNS or BUDGET, not out of things to find; its `verdict` is a FLOOR on what is wrong, never a ceiling. `verdict` and `stop_condition` are the only two ways a review concludes on its own terms. `review-check.sh gate`'s envelope names this mechanically now — `.artifact.cap_terminated` is `true` for every `cap:*` value and `false` for the other two — so read it rather than re-deriving the enum split by eye every time; a prior QA pass did exactly that by hand during D1 and immediately found a sibling defect one screen from the capped reviewer's own finding, which is the judgement this field turns into a mechanical check anyone (including a future automated gate) can run. A `cap_terminated: true` artifact — whatever its `verdict` — is not sufficient grounds by itself to `qa-gate.sh approve`: continue investigating yourself (another review module, a second pass, a manual read of the capped area) before treating the change set as clean.
+
 ```bash
-ART="$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-artifact-$TID-r$REVIEW_ITERATION.json"
-bash "$CLAUDE_PROJECT_DIR/.claude/scripts/review-check.sh" validate-artifact "$ART"
-bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID" --file "$ART"
+# $ART_JSON is the object above, composed as a shell variable (e.g. via
+# jq -n or a heredoc) — NOT written to any path yourself first.
+printf '%s' "$ART_JSON" | bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID"
 ```
 
-`review-record` re-validates through the same one validator and appends the durable record comment (`REVIEW-ARTIFACT v1 iteration=... reviewer=... findings=[...] at <ts>: <summary>`). It is a record writer only — no labels change, no approval is created. Then continue to section 6 and carry the artifact into the packet as item 8.
+`review-record` re-validates through the same one validator, writes the validated JSON to the derived canonical path, hashes it (`workflow-manifest.sh hash-file`, the same instrument the design side uses), and appends the durable record comment — now carrying an `artifact_hash=<64 hex>` machine token alongside the existing ones (`REVIEW-ARTIFACT v1 iteration=... reviewer=... findings=[...] artifact_hash=... at <ts>: <summary>`), so the record names the bytes rather than restating them. It is a record writer only — no labels change, no approval is created. The canonical file survives `qa-gate.sh approve` (it is deliberately not touched by the completed-cycle cleanup that used to remove it) and enters the change set the approval binds, so the reviewer's own evidence, not just the record summarising it, outlives this cycle. If you already have the artifact at a real path (e.g. handed off by the Sol lane), `--file <path>` still works, but ONLY when `<path>` already equals that same derived location — it asserts the derivation, it does not let you point the record at other bytes. Then continue to section 6 and carry the artifact into the packet as item 8.
 
 **Lane `codex` — hand off to the orchestrator's relay.** Persist the request (the file above; optionally also `bd_doc_write(task_id="$TID", name="review-request", content=...)` so it survives the spawn boundary auditably) and return `qa_status: "needs-review"`:
 
@@ -436,6 +442,11 @@ bash "$CLAUDE_PROJECT_DIR/.claude/scripts/qa-gate.sh" review-record "$TID" --fil
   "blockers": [],
   "llm_observations": "freeform — REVIEW-RELAY: status=needs-review. The validated review request is at .claude/.qa-tracking/review-request-<task-id>.json (risk_threshold=<sev>, stop_condition=<...>). The root orchestrator runs codex-review.sh at the root, records the artifact via qa-gate.sh review-record, and re-engages QA; the artifact is ADVISORY packet item 8.",
   "context_coverage": "freeform — what you read to reach this handoff (the diff, the SPEC, the impact report, which review modules you ran), what you deliberately skipped and why, and the largest unknown the reviewer should chase.",
+  "unit_id": "",
+  "design_hash": "",
+  "green_before": "none",
+  "green_after": "none",
+  "criteria_tests": {},
 
   "approved": false,
   "qa_status": "needs-review",
@@ -452,7 +463,7 @@ The sentinel `REVIEW-RELAY: status=needs-review` MUST appear verbatim in `llm_ob
 
 On this spawn you do NOT run `codex-review.sh` yourself (it drives an MCP server and is a PAID external call the orchestrator cost-gates at the root — the same structural reason the grader spawn lives at the root), do NOT call `qa-gate.sh approve`, and do NOT call `qa-gate.sh block`.
 
-**On re-engagement.** The orchestrator has recorded the artifact, so the latest `REVIEW-ARTIFACT v1` comment on `bd show $TASK_ID` carries it; read it the same way section 6c reads the RUBRIC comment. Fold it into the packet as item 8 and proceed. If the orchestrator reports the Codex lane degraded (its driver exited 5 — timeout or server failure), run the `claude` lane THIS round instead: author the artifact yourself per the block above, and record the degradation in `llm_observations` so the audit trail shows which lane actually produced the review.
+**On re-engagement.** The orchestrator has recorded the artifact, so the latest `REVIEW-ARTIFACT v1` comment on `bd show $TASK_ID` carries it; read it the same way section 6c reads the RUBRIC comment. Fold it into the packet as item 8 and proceed. If the orchestrator reports the Codex lane degraded (its driver exited 5 — timeout or server failure, or 7 — the assembled request exceeded `max_request_bytes` and was refused before any Sol call was attempted), run the `claude` lane THIS round instead: author the artifact yourself per the block above, and record the degradation in `llm_observations` so the audit trail shows which lane actually produced the review. If Sol's artifact DID land but carries `stopped_by: "cap:*"` (`review-check.sh gate`'s `.artifact.cap_terminated: true`), it is not a degradation and not a pass either — Sol ran out of budget rather than concluding, so treat it exactly as the cap-terminated guidance above says: fold it into the packet, but do not let it alone justify approval, and note in `llm_observations` which cap fired.
 
 ### 6p.3 What the artifact does and does not do
 
@@ -508,11 +519,19 @@ The packet is eight items — seven mandatory, plus the advisory review artifact
 
 4. **The specialist's F7 completion contract** — the structured JSON return payload the specialist surfaced when handing the task to QA. Read it from the Beads task notes or from the orchestrator's hand-off. All seven base fields (`task_id`, `files_changed`, `tests_added`, `decisions`, `blockers`, `llm_observations`, `context_coverage`) must be present; missing fields are a finding the grader will record.
 
-5. **`LESSONS.md` contents**:
+5. **`LESSONS.md` contents — the WHOLE ledger, never a filtered slice**:
 
    ```bash
-   cat "$CLAUDE_PROJECT_DIR/LESSONS.md"
+   # `list` with no flags prints the file verbatim, same bytes as `cat`.
+   bash "$CLAUDE_PROJECT_DIR/.claude/scripts/lessons.sh" list
    ```
+
+   The helper also takes `--tag`, `--since` and `--limit`. **Do not pass them
+   here.** Lessons are criteria-by-reference for the grader — every recorded
+   lesson is a pass/fail check it applies to the diff — so a filter narrows
+   the CRITERIA, not the reading time, and it does so silently: the packet
+   still looks complete. The orchestrator's planning read is the one that
+   scopes (`orchestrator.md`).
 
 6. **The rubric file(s) to apply** — default plus the domain overlay matching the task label, plus the bugfix overlay when the task type is `bug`:
 
@@ -545,8 +564,11 @@ The packet is eight items — seven mandatory, plus the advisory review artifact
 
    ```bash
    cat "$CLAUDE_PROJECT_DIR/.claude/.qa-tracking/review-artifact-$TASK_ID-r$REVIEW_ITERATION.json"
-   # Fallback — the durable record on the task:
-   bd show "$TASK_ID" --json \
+   # Fallback — the durable record on the task. --include-comments is REQUIRED
+   # on bd >= 1.1.2 (a plain show returns only a comment_count, so this comes
+   # back empty); the second leg covers bd 0.47.x, which rejects the flag.
+   { bd show "$TASK_ID" --json --include-comments 2>/dev/null \
+       || bd show "$TASK_ID" --json; } \
        | jq -r '(if type == "array" then .[0].comments else .comments end) // []
                 | map(select(.text | test("^REVIEW-ARTIFACT v1 ")))
                 | last.text // ""'
@@ -612,6 +634,11 @@ Then return the structured `needs-grading` status in your completion contract �
   "blockers": [],
   "llm_observations": "freeform — RUBRIC-RELAY: status=needs-grading. The grading packet is persisted as bd_doc grading-packet on the task; the root orchestrator picks it up, spawns the grader, records the verdict via qa-gate.sh grade-record, and re-engages QA on the next spawn.",
   "context_coverage": "freeform — which of the eight packet items you actually read end-to-end versus pasted through, anything you could not obtain (and why), and the largest unknown the grader is being asked to decide without.",
+  "unit_id": "",
+  "design_hash": "",
+  "green_before": "none",
+  "green_after": "none",
+  "criteria_tests": {},
 
   "approved": false,
   "qa_status": "needs-grading",
@@ -635,7 +662,12 @@ When the orchestrator re-engages QA, your first move is to read the latest RUBRI
 ```bash
 # The most recent RUBRIC comment carries the verdict the orchestrator
 # recorded via qa-gate.sh grade-record.
-LATEST_RUBRIC=$(bd show "$TASK_ID" --json \
+# --include-comments is REQUIRED on bd >= 1.1.2: a plain `bd show --json`
+# returns a comment_count integer and NO comment bodies, so this read comes
+# back empty and the relay silently loses the verdict. bd 0.47.x rejects the
+# flag but inlines comments already, hence the fallback leg.
+LATEST_RUBRIC=$( { bd show "$TASK_ID" --json --include-comments 2>/dev/null \
+    || bd show "$TASK_ID" --json; } \
     | jq -r '(if type == "array" then .[0].comments else .comments end) // []
              | map(select(.text | test("^RUBRIC [0-9]+ iteration")))
              | last.text // ""')
@@ -763,17 +795,27 @@ A candidate lesson is anything that would have changed how the orchestrator deco
 
 ```bash
 # Propose, don't apply. The user (or the orchestrator on the next turn)
-# decides whether to merge. Emit one bash command per candidate lesson:
-bash .claude/scripts/lessons.sh add \
-    'Mocks of unowned downstream producers must derive their shape from a fixture extracted from the producer spec, not a hand-rolled object.' \
-    --source <task-id>
+# decides whether to merge. Emit one bash command per candidate lesson.
+#
+# Use --stdin with a QUOTED heredoc, never an inline quoted string. Single
+# quotes end at the first apostrophe — that is how several shipped entries
+# lost their possessives ("the gate's own" became "the gate own") — and
+# double quotes run the backticks lessons routinely contain as command
+# substitution. A quoted heredoc is literal on both counts.
+#
+# --tag is REQUIRED and repeatable. The vocabulary is closed: gate, testing,
+# packaging, agents, evidence, process (see the LESSONS.md preamble).
+bash .claude/scripts/lessons.sh add --stdin \
+    --source <task-id> --tag testing <<'LESSON'
+Mocks of unowned downstream producers must derive their shape from a fixture extracted from the producer's spec, not a hand-rolled object.
+LESSON
 ```
 
-The helper dedup-merges by normalized text, so re-proposing a lesson the ledger already has just appends the new source — safe to over-propose.
+The helper dedup-merges by normalized text, so re-proposing a lesson the ledger already has just merges the new source and tags into that entry — safe to over-propose. The same normalization is why a damaged entry cannot be repaired by re-adding a corrected version: different text is a different lesson, so the corrected copy lands as a duplicate. Propose new lessons; leave existing prose alone.
 
 ## 10. Completion contract
 
-When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus a documented QA-specific superset on top. The base seven must keep their canonical names and ordering; QA-specific fields are additive, not replacements. `context_coverage` is the seventh and newest, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises.
+When you finish a review — whether you approved or blocked — return a structured completion report to the orchestrator alongside the gate-helper call. The contract is the canonical seven base fields shared with `backend.md`, `frontend.md`, and `devops.md`, plus (v5 D5, claude-workflow-plugin-fkm.7) four more green-to-green fields appended after them (piece 3), plus one more — `criteria_tests` (piece 4) — appended after that, plus a documented QA-specific superset on top of all twelve. The base seven must keep their canonical names and ordering; the five v5 D5 fields and the QA-specific fields are both additive, never replacements. `context_coverage` is the seventh and newest of the base seven, appended after `llm_observations` precisely so the original six keep the positions every other prompt promises; `unit_id`/`design_hash`/`green_before`/`green_after` are newer still, appended after that; `criteria_tests` newer again, appended last of the five. `criteria_tests` on a QA-authored payload is ordinarily `{}` — you verify criteria coverage, you do not author it — see `.claude/scripts/qa-gate.sh`'s DESIGN-ALIGNMENT region if you need to check a specialist's own mapping.
 
 ```json
 {
@@ -784,6 +826,11 @@ When you finish a review — whether you approved or blocked — return a struct
   "blockers": ["issues that prevented QA from completing the review"],
   "llm_observations": "freeform — mandatory",
   "context_coverage": "freeform — mandatory: what you read, what you deliberately skipped and why, the largest remaining unknown",
+  "unit_id": "",
+  "design_hash": "",
+  "green_before": "none",
+  "green_after": "none",
+  "criteria_tests": {},
 
   "approved": true,
   "files_verified": ["path/to/file.ts", "path/to/other.py"],
@@ -803,6 +850,8 @@ Base-field semantics for the QA role:
 - `blockers`: issues that blocked QA from completing the review itself (missing fixtures, environment failures, unreviewable diffs, upstream task incomplete). This is review-process-blocking and is different from `must_fix`, which is implementation-blocking and feeds into `qa-gate.sh block`.
 - `llm_observations`: freeform, mandatory. Use it for anything the schema does not capture — surprising behaviour, hunches about brittle areas, notes for the QA-of-QA reviewer, or context the next agent in the chain will need. Never leave it empty; an empty string defeats the purpose of the contract.
 - `context_coverage`: freeform, mandatory. Three things, in order — what you read to reach this verdict (which packet items, which files in the diff, which prior comments on the task), what you deliberately did NOT read and why (a file you judged out of blast radius, a subsystem you scoped out), and the largest remaining unknown your verdict rests on. For QA specifically this is where a bounded review declares its own bounds: an approval that scoped itself to two files is honest, an approval that silently did so is not. Name files; "reviewed the change set" is a non-answer.
+- `unit_id` / `design_hash`: `""` for QA — you review, you do not implement a design unit, so there is nothing to bind these to. Leave them empty rather than copying the specialist's values; the completeness cross-check reads the IMPLEMENTER's contract for that identity, not yours (section 3's F7 checklist item covers the same "don't overwrite the implementer's declaration" discipline).
+- `green_before` / `green_after`: `"none"` for QA on the same grounds — the green-to-green protocol is the implementer's, not the reviewer's.
 
 QA-specific superset (additive, on top of the base seven):
 
@@ -815,3 +864,75 @@ QA-specific superset (additive, on top of the base seven):
 - `qa_status` (relay spawns only): `"needs-grading"` (section 6b) or `"needs-review"` (section 6p.2) when you are handing off mid-cycle rather than deciding. Carries `rubric_iteration` / `review_iteration` alongside it. Omit the field entirely on a spawn where you approve or block; `approved` is the decision.
 
 When `approved` is `false`, `must_fix` must be non-empty and must match the reasons recorded via `qa-gate.sh block`. When `approved` is `true`, `must_fix` should be empty and any residual concerns belong in `suggested_followups` (and, where appropriate, in newly-filed Beads tasks per section 7).
+
+### Reconcile task state before you report
+
+Re-read the task's own state at completion and reconcile it against what you actually passed. One `bd show <id>` (or the response body of the last
+`bd update` you issued — it echoes the post-write state) against the fields you
+set. If the status, the labels, or the notes carry something you did not write,
+say so in `llm_observations` and do not report the task as cleanly finished.
+
+This costs one call and it is the cheapest guard the workflow has against a
+hook writing a claim about your task that nothing you did justifies. It exists
+because it happened: a Stop-time fast path stamped `qa-approved` and
+`status=closed` on four tasks — including a release task, 22 seconds into an
+implementer's spawn, over a *previous* task's change set. It was caught exactly
+once, and only because `bd_update_task` echoed back `status=closed,
+labels=[devops,qa-approved]` to an implementer that had passed neither while
+setting notes. Three earlier instances went unnoticed. The mechanism took two
+fixes to close (`claude-workflow-plugin-qzv`, then `qzv.1` — the first turned out
+to work only in the FIRST review cycle, and a specialist re-spawned in the second
+was invisible to it again). That history is the reason to keep running this check
+rather than to stop: the version that looked fixed was the version that let it
+through. This remains the containment — a label or a status you cannot account
+for is a finding, not a formality. You are the gate, so an unaccounted label on a
+task you are about to approve is a block, not a note. And the check is yours to
+run on your own work too: the in-flight guard reads `IMPLEMENTER` records, which
+the `qa` role deliberately does not write, so a doc-only change set you authored
+during a review can still be auto-approved with `reviewed_by=none`. Read
+"doc-only" as whatever `is_doc_only_path` says and nothing else — do not
+paraphrase it here or anywhere; the paraphrase in this paragraph was wrong for
+three consecutive rounds. Since `claude-workflow-plugin-bbh` it no longer treats
+a file's *position* (anything under `docs/`) or a name glob (`LICENSE.*`) as
+documentation, and it never classifies a file with the executable bit set or a
+`#!` first line as doc-only. Since `claude-workflow-plugin-s5qf` it also refuses
+any path the project DECLARES as part of its own surface — every
+`workflow-manifest.sh` row plus `CLAUDE.md` — so an agent prompt, a rubric,
+`.claude/commands/*.md`, a skill, `LESSONS.md` and `docs/HOOKS.md` are no longer
+fast-pathable, and a NEW declared artifact is covered with no list edited
+anywhere. Since `claude-workflow-plugin-fkm.3` (v5 D1) that declaration also
+covers `docs/specs/*.md`, the design artifact, so a change set that is exactly a
+design document gets a review round rather than the fast path. What still reaches
+the exemption is documentation by NAME that nothing declares: a `.txt` that is
+really a golden test assertion, a bare `LICENSE` that is really a data file, and
+the DELETION of an otherwise-declared path. If you authored one of those during a
+review, that is the case to watch for. The exemption, its bound and the
+remaining residual are set out in the `F1-CHANGE-SET-BINDING` and
+`GOVERNING-ARTIFACT-VETO` region headers of `verify-before-stop.sh`.
+
+### Record the contract — AFTER the gate call, not before
+
+The contract is no longer enforced by convention. `qa-gate.sh approve` REFUSES (exit 2, `error_key=completion_record_missing`) unless the task carries a validated `COMPLETION v1` record.
+
+**That refusal is satisfied by the IMPLEMENTER's contract, not by yours.** So record yours LAST, after the section-7 gate call, exactly as every other prompt does — a contract describes completed work, and your review is not complete until the gate call is made.
+
+An earlier draft of this section told you to record FIRST, and that instruction shipped a defect worth naming here, because the shape recurs. Your `files_changed` is normally `[]` (you verify files, you rarely author them). The completeness cross-check reads a contract's `files_changed` as its independent witness of what shipped. When your record was the most recent one, the check read YOUR empty list and reported an affirmative *"PASSED — every one of the 0 declared file(s)"* over a change set that was provably missing six of the implementer's eight declared files. A guard that reports success because it read the wrong record is worse than no guard. Two things now make the ordering non-load-bearing — the artifact is keyed by role so contracts cannot overwrite each other, and the cross-check selects the implementer's record rather than the latest — but record last anyway: it is the natural order, and it is one fewer thing depending on a fix.
+
+If `approve` refuses with `completion_record_missing`, do NOT satisfy it by recording your own contract first. Read the refusal as the signal it is: either the specialist finished without recording its contract, in which case block and send it back, or there was genuinely no specialist, in which case the audited `--no-completion '<reason>'` bypass is the honest exit and the reason should say which.
+
+```bash
+# The payload is the JSON object above with THREE keys added: "role": "qa",
+# plus "model" and "pin" (claude-workflow-plugin-46w9).
+# A QUOTED heredoc keeps backticks and apostrophes literal — see the bullets.
+bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" <<'PAYLOAD'
+{ "role": "qa", "model": "...", "pin": "...", "task_id": "...", ... }
+PAYLOAD
+```
+
+- `role` is transport metadata for the record's `role=` token — the record has to name who completed the task — not an eighth F7 field. The seven and the QA superset are unchanged; your extra keys are recorded in the `fields=` list and are welcome.
+- `model`/`pin` (46w9) are the SAME two fields section 6-prime's `reviewer_model`/`reviewer_pin` are, applied to the completion record rather than the review artifact: `pin` is this file's own `model:` frontmatter line, read directly; `model` is a RUNTIME SELF-REPORT — state what you understand yourself to be running as, never re-derived from the frontmatter. Required on every completion record regardless of role, same character class as `reviewer_model`/`reviewer_pin` (letters, digits, `.`, `-`, `:`, `/`, `[`, `]`), rejected rather than sanitised if it does not fit.
+- Use a quoted heredoc, or `--file <path>`. Never assemble the JSON in a double-quoted shell string: a backtick in `llm_observations` runs as command substitution, and a single-quoted one ends at the first apostrophe — `LESSONS.md` records six ledger entries that lost their possessives to exactly that.
+- The payload is VALIDATED before it is recorded, by `review-check.sh validate-completion`. A missing key, a control character in `task_id` or `role`, a non-array `files_changed`, or an empty `llm_observations` / `context_coverage` is rejected with a structured error naming the field. An empty mandatory field is now a failure rather than a habit.
+- On a **block**, record the contract too. The refusal only gates `approve`, but the record is the durable statement of what the review covered, and the next cycle's reviewer reads it.
+- `files_changed` is the INDEPENDENT witness `approve` cross-checks the change set against — for QA that is usually `[]`, since `files_verified` is the larger set and is not what the cross-check reads. The approval envelope reports how many declared paths are absent from the set it binds; read that line, because it is the only signal in the system that a change set is SHORT rather than merely stale (`claude-workflow-plugin-fkm.1.20`).
+- The audited `approve --no-completion '<reason>'` bypass exists for the Stop hook's doc-only fast path. If you reach for it, say in the reason why no specialist owed a payload — "I did not write one" is not that reason.

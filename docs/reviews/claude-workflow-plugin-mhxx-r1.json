@@ -1,0 +1,78 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-mhxx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "c003bf85916150d6ab7acf321d6b16675be365815dff69707afef520182be993",
+  "risk_threshold": "medium",
+  "stop_condition": "REVIEWER IDENTITY: invoked through the codex MCP with NO model override, so it ran as the configured default `model = \"gpt-5.6-sol\"` (~/.codex/config.toml, model_reasoning_effort = xhigh); asked to state its identity it self-reported 'GPT-5', recorded here rather than in the id field, which the validator constrains to the model-id character class. SUBJECT: docs/handover/v5.0.0-handover.md (commit d5be5a7), a read-only audit of the v5.0.0 arc written to drive a release-or-refine decision. The QA gate refused approval with error_key=review_artifact_missing and offered a `--no-review` bypass; the bypass was DECLINED and this review run instead, because every headline figure in the document was computed by its author, the author had already made two measurement errors during the same audit, and a handover with a wrong number is worse than no handover since it will be acted on. BRIEF: verify FACTS, not prose — re-run the document's own commands against the repository and report any figure that does not reproduce; adjudicate whether the recommendation is supported; check every item in the document's 'What is not true' section, on the grounds that a false entry there is worse than an omission because readers trust it most; and specifically check whether the author's decision NOT to file a stale-lease defect had suppressed a real finding. METHOD: read-only, no files written, no suite run. The reviewer recomputed the frozen manifest by taking all 138 SHA-256 values from `git show v5.0.0:<path>` rather than invoking `make verify-release`, to honour the read-only constraint while still checking the claim. VERDICT BLOCK: nine findings, four HIGH, two of which change conclusions in the base document — and one of those REDUCES the release risk the document asserted. HASH NOTE: reviewed_hash is the change set as it stood at review time (handover + the tnue r2 artifact). The dated addendum answering these findings was committed afterwards, moving the live hash to 0376a75b; that one-step lag is the same accepted structure as the h2zz and tnue artifacts in this directory. CONFIRMED BY THE REVIEW, recorded because a verification that reports only failures is not a verification: the headline CI comparison the entire recommendation rests on (tag run 35865474657 at 5 failed / 5 PARTIAL / failing shellcheck / 7487 assertions, versus bff6cc4 run 36232214628 at 3 failed / 1 PARTIAL / passing shellcheck); the claims ledger at 11/6/1/0/18 AND the author's stated diagnosis of the count he discarded; the 365,795-insertion diff total and the 238,508-line fixture share at 65.2%; zero live references to all four removed-mechanism identifiers; the 138-row / 13.6 MB / 128,739-line installed footprint; both hygiene file counts; and that the stale-lease finding was substantively correct, so no real defect was suppressed by declining to file it.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": "docs/handover/v5.0.0-handover.md:48",
+      "evidence": "`gh run view 36232214628 --log | grep -oE 'Assertions executed: [0-9]+' | tail -1` returns 7764. The same command against run 36228388997 (commit 44a1777) returns 7746. Verified independently by the document's author after the finding was raised.",
+      "description": "The L1 assertion count quoted for run 36232214628 is 7,746. The actual value is 7,764; 7,746 belongs to a different run at a different commit. Two errors compounded — a digit transposition and attribution to the wrong run. FIX: correct to 7,764 and extract the value from the cited run."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": "docs/handover/v5.0.0-handover.md:266 (section 15, item 4)",
+      "evidence": "Run 36232214628's L2 job reports `Specs:      Total: 48  Passed: 32  Failed: 1  Skipped: 15  Partial: 4` with 2,353 passing assertions. Confirmed by the author against the same log.",
+      "description": "FALSE STATEMENT INSIDE THE SECTION LISTING FALSE STATEMENTS. The document asserts that at HEAD 'every L2 spec skips on BD_SHIM_ONLY=1' and that L2 therefore gives 'near-zero signal'. In fact 32 of 48 specs pass and 15 skip. The error came from generalising a log excerpt showing consecutive skips into a universal, without counting. This is the worst placement for a false claim because readers trust that section most. FIX: state the measured L2 result and identify which 15 specs skip."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "high",
+      "location": "docs/handover/v5.0.0-handover.md sections 9 and 16",
+      "evidence": "The published priority table sums 4 + 90 + 105 + 96 + 14 = 309, against a stated total of 292. `bd list` defaults to `--limit 50` and the verification command in section 21 omits `--limit 0`, so the query was not exhaustive.",
+      "description": "The backlog figures are internally inconsistent and were not exhaustively measured. Section 9 presents 292 as an OPEN count; section 16 reuses the same number as a LIVE TOTAL — different populations. Every backlog figure in the document should be treated as unverified pending an exhaustive, status-scoped re-measurement. The four P0 identities are unaffected, having been read individually. FIX: re-measure with an exhaustive query, define the included statuses, and compare ledger and live store over the same population."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "high",
+      "location": "docs/handover/v5.0.0-handover.md:269 (section 15, item 7)",
+      "evidence": "The 442 rows of .beads/issues.jsonl span all statuses (208 open, 10 in_progress, 1 deferred, 223 closed). The 292 figure was measured with `--status open`.",
+      "description": "The item asserts that '292 open tasks is the backlog' is false, and offers 442 ledger rows as the evidence. The two counts cover different populations and the comparison cannot support the claim. The defensible proposition is narrower and survives: .beads/issues.jsonl (mtime Aug 26) is not a current reflection of the live store and must not be read as ground truth. FIX: state the proposition the evidence actually supports, and verify it with status-scoped counts on both sides."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "medium",
+      "location": "docs/handover/v5.0.0-handover.md:303 (section 19)",
+      "evidence": "`grep -c 'test-cmd' manifests/v5.0.0.sha256` -> 0; `grep -c '\\.claude/scripts/tests/' manifests/v5.0.0.sha256` -> 0; `grep -c 'impact-report.test.sh' manifests/v5.0.0.sha256` -> 0. Run by the author after the finding was raised, all three confirming.",
+      "description": "THE CONSUMER-EXPOSURE ARGUMENT IS FALSE, AND IT OVERSTATED THE COST OF RELEASING. Section 19 argues that teammates installing from main would receive `.claude/test-cmd` narrowing their own Stop gate, and would run the kyj5 litter-producing L1 test. Neither reaches a target: `.claude/test-cmd` is untracked and absent from the shipped manifest, `.claude/scripts/tests/` is repository-only, and impact-report.test.sh is not installed. FIX: describe both as repository-maintainer hygiene defects rather than installed-user exposure. The recommendation direction survives, but two of the three urgency reasons given were wrong about who is affected."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": "docs/handover/v5.0.0-handover.md:229-235 and the closing correction note",
+      "evidence": "Recursive anchored enumeration gives agents/rubrics/skills = 1,215, not 1,175 — the published pathspec misses the nested .claude/skills/workflow-engine/SKILL.md (40 lines). Product is therefore 36,731. Separately, the duplicated test overlap under the original unanchored pathspec was 58,878 lines, while 52,411 was the net table overage after an omitted 6,467-line remainder.",
+      "description": "Two distinct inaccuracies in the size section. First, the corrected pathspec still excludes a nested shipped skill, understating product by 40 lines (10.0% share unchanged). Second, the closing note's description of the original error — 'double-counted 52,000 lines' — conflates the duplicated overlap with the net overage; they are different quantities. FIX: use recursive anchored pathspecs, report product 36,731 and remainder 6,427, and distinguish the 58,878 duplicated lines from the 52,411 net overage."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "medium",
+      "location": "docs/handover/v5.0.0-handover.md:270 (section 15, item 8)",
+      "evidence": "Section 13 of the same document states that install reality was NOT performed, and says only that no evidence of real-world use was found.",
+      "description": "Listing 'the plugin has been used on real work' as FALSE overreaches. Absence of evidence in an audit that explicitly declined to perform the install check does not establish falsity. FIX: move it to an unknown/not-established list, or state that this audit does not establish real-world use in either direction."
+    },
+    {
+      "id": "R1-F9",
+      "severity": "medium",
+      "location": "docs/handover/v5.0.0-handover.md section 21",
+      "evidence": "Section 21 supplies only the fixture slice of the size decomposition; its CI commands return job conclusions but not the failure, partial or assertion totals the document quotes; and it contains no commands for the installed-size arithmetic, the removed-mechanism checks, the P1 count, or several hygiene claims.",
+      "description": "The document claims every headline figure carries its command, and section 21 does not deliver that. A reader cannot reproduce the document from it alone, which is a defect in the artifact's central promise — a verification section that does not verify is the same family the whole arc is about. FIX: supply exact, exhaustive commands for every reported number, including log extraction and all category pathspecs."
+    },
+    {
+      "id": "R1-F8",
+      "severity": "low",
+      "location": "docs/handover/v5.0.0-handover.md:129 (section 7)",
+      "evidence": "`find .claude/.qa-tracking/leases -type f -exec stat -f '%m %Sm %N' ...` gives the oldest as lease.L2.JFNiIx at 2026-08-24 23:30:33 +0700.",
+      "description": "The oldest stale lease is dated Aug 24, not Aug 26. The by-design conclusion drawn from it is unaffected and was independently confirmed correct."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

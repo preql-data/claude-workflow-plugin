@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-gsfd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "f91d0bbe6c9632c97cf795b0b6cd712bb39248c0e477ab18c136da2bbf0587b0",
+  "risk_threshold": "high",
+  "stop_condition": "the round-3 findings adjudicated, plus a targeted review of the daemon retirement and the in-process run_with_timeout rewrite that the fix round introduced beyond the findings' scope",
+  "verdict": "findings",
+  "iterations": 4,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R4-F1",
+      "severity": "high",
+      "location": ".claude/scripts/verify-before-stop.sh:2249 (run_with_timeout)",
+      "evidence": "Verified by reading: the supervision loop's condition is `kill -0 \"$child_pid\"` and the normal path waits only for that PID; the process group is terminated only while the wrapper is still alive at the deadline. So a command that backgrounds its real work — the canonical shape being `sleep 1800 &` — lets the `bash -c` wrapper exit 0 immediately, and run_with_timeout returns 0 while the reparented child keeps running indefinitely in the isolated process group. The isolation also places that child outside the caller's original group, and the hook installs no signal-cleanup trap. Process outcome inferred from standard bash asynchronous-command semantics; the code path itself was read.",
+      "description": "The timeout is defeated and the function reports success while the work it was supervising is still running — in the one function every verification this plugin performs flows through (tests, lint, type-check). It can also strand tree-mutating verification work that continues after the gate has already reported. This is the batch's own defect family sitting in its most load-bearing place, introduced by the daemon-retirement rewrite rather than by any earlier round."
+    },
+    {
+      "id": "R4-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh:2248 (deadline accounting)",
+      "evidence": "The stated wall-clock cap is implemented as a count of completed one-second polls. Each iteration's scheduling delay and heartbeat work falls outside the counted second, so 1200 completed ticks can take materially longer than 1200 seconds under load. More seriously, a stalled `lease_heartbeat`/`touch` blocks the supervisor loop itself, so the deadline cannot fire at all. Verified by reading; drift not measured.",
+      "description": "A timeout that is a tick count rather than a clock reading silently lengthens exactly when the machine is busy — which is when a timeout matters. And making the supervisor perform the heartbeat couples the deadline's liveness to the filesystem operation it is supervising."
+    },
+    {
+      "id": "R4-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/run-tests.sh:900 and .claude/tests/component/run.sh:567 (per-spec heartbeat counter)",
+      "evidence": "The heartbeat counter resets to zero for every spec, so a tier lasting many minutes but composed entirely of sub-30-second specs never refreshes its lease. After 90 seconds a second host sharing the hostname can misread the first runner's foreign pid as locally dead and reclaim a still-live lease. The replacement controls are real and discriminating, but their single 35-second spec exercises the long-spec case and specifically misses this cumulative-short-spec case.",
+      "description": "R3-F3 is PARTIALLY FIXED. A single long command does heartbeat throughout — the case the fix was designed for — but the ordinary tier shape (many short specs) does not, which reopens the very collision the active heartbeat was introduced to protect against."
+    },
+    {
+      "id": "R4-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:1057-1073 (generation mkdir lock)",
+      "evidence": "The lock permanently fails open if its holder dies before :1073: there is no owner record and no stale-lock recovery, so every later wipe waits roughly one second and then performs the read-modify-write unlocked. Two overlapping wipes can then publish the same generation, letting a Stop captured between them miss the later cycle transition. Verified by reading.",
+      "description": "R3-F2 is PARTIALLY FIXED. Bumping before deleting plus the post-write rollback genuinely narrow the race, but the increment is still not atomic, and this is broader than the code comment's 'extreme contention' disclosure: one interrupted holder leaves the degraded state permanent rather than transient."
+    },
+    {
+      "id": "R4-F5",
+      "severity": "low",
+      "location": "CHANGELOG.md:192; .claude/scripts/tests/tree-lease.test.sh:57,532; .claude/scripts/verify-before-stop.sh:89,4262",
+      "evidence": "Documentation still describes the removed six-hour heartbeat daemons and their fd-redirect controls as the shipped mechanism; the spec still says 'heartbeat daemon' in two places; and the hook still attributes dispatch to GNU `timeout` in two comments. Static search confirms the implementation is now in-process and the redirect controls were retired.",
+      "description": "A mechanism-documentation regression created by the retirement: the shipped text describes machinery that no longer exists, so the next reader cannot tell which description is authoritative."
+    }
+  ]
+}

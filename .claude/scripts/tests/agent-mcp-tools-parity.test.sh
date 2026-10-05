@@ -71,6 +71,21 @@ EXEMPT_AGENTS=(
     # no MCP tool references; it classifies survivors from a packet
     # the orchestrator hands it. No MCP grants needed (Phase C.2).
     "judge"
+    # design-reviewer.md — separate-context design reviewer, same
+    # read-only tool set (Read, Grep, Glob, LS) as grader/judge and
+    # for the same structural reason: it scores a packet the ROOT
+    # ORCHESTRATOR assembled and hands it, and it must not be able to
+    # mutate the artifact it is judging. Its body names `impact_of`
+    # because the packet CONTAINS impact_of output — describing an
+    # input it is given, not a call it makes. No MCP grants needed
+    # (v5.0.0 Phase D0).
+    #
+    # NOT exempt, deliberately: designer.md. The designer carries real
+    # MCP grants (bd for the epic, code-graph for cross-repo impact)
+    # and must keep satisfying this check the ordinary way. Exempting
+    # both design agents "because they are both new" would have
+    # removed the designer's only body-vs-grants assertion.
+    "design-reviewer"
 )
 
 # Tool-to-server registry. Hard-coded so the checker stays offline (no

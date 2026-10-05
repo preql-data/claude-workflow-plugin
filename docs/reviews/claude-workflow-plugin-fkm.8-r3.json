@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.8",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "c0d94e4e2761593830e930e21c0219be17124766aa944209124b75ea0db341a7",
+  "risk_threshold": "high",
+  "stop_condition": "The R2 repairs are verified against the frozen code, the rewritten 5f section describes only states cmd_design_rollup can actually reach and omits none whose handling differs, the docs-only claim is verified at line level rather than taken, and no critical/high finding remains.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "medium",
+      "location": ".claude/agents/orchestrator.md Step A (the iteration note, ~:908) vs Step D's closing line (:972)",
+      "evidence": "Step A defines the counter PER HASH: 'the round you are on is however many times you have run this relay for the CURRENT `design_hash`, tracked in your own relay notes, defaulting to 1 for a hash that has never had a rollup verdict recorded against it yet.' Step D's closing line says: 'Either way, return to Step B at `iteration + 1` — against the SAME `design_hash` for an implementation-side fix, or the amended one for a design-side fix.' A design-side fix MOVES the hash, so the new hash is by definition one 'that has never had a rollup verdict recorded against it yet' — Step A says that is iteration 1, Step D says it is iteration + 1. The two disagree, and BOTH sentences were written or reworked this round (Step A gained its new 'This can genuinely reach 2 or more against the SAME hash' emphasis; Step D's closing line gained its 'or the amended one' fork). No code arbitrates: `grep -c 'DESIGN-ROLLUP v1 reviewer=.*iteration'` on qa-gate.sh returns 0 and `iteration_cap` appears 0 times anywhere in cmd_design_rollup, so the DESIGN-ROLLUP grammar carries no iteration field and the prose is the ONLY definition this counter has.",
+      "description": "The counter is what `ITERATION_CAP` (default 3) is compared against, and the cap is the sole trigger for Step F escalation to the operator. Under Step A's per-hash reading, an arc that runs two implementation-side rounds and then needs a design amendment restarts at 1 against the new hash and can run three more before escalating; under Step D's reading it escalates on the third round overall. Those are materially different operator experiences of a gate whose whole purpose is bounded diligence. Neither reading is unsafe — approve's predicate is the RECORD, never the iteration — so this cannot produce a wrong approval, which is why it sits below the threshold. But it is an indeterminate definition in the one document that defines it, introduced by the same rewrite that fixed R2-F1, which is precisely the 'a section rewritten to match a fix is where a new claim goes wrong' class the coordinator asked me to watch for. FIX: pick one and say it in both places. I would pick per-hash (it matches Step A, it matches the fact that an amendment genuinely resets what is being judged, and it makes the 'reached 2 or more against the SAME hash' sentence meaningful) and change Step D's design-side fork to say the counter RESETS to 1 against the amended hash, with the cross-amendment bound carried instead by the existing 'two consecutive cap-hits on the same epic' failure-mode bullet, which already exists precisely to catch the runaway case."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "low",
+      "location": ".claude/agents/orchestrator.md 5f, Step D's refusal list and the failure-modes list",
+      "evidence": "I ran the cross-reference by hand in both directions. Direction prose->code is CLEAN: every error key 5f names exists in the script (design_rollup_mechanical_prerequisite, design_rollup_not_applicable, design_reviewer_not_independent, design_rollup_hash_stale, design_rollup_duplicate_hash, design_rollup_missing, design_rollup_verdict_stale, design_rollup_incoherent — all present, none stale). Direction code->prose: cmd_design_rollup can emit ~34 distinct keys and 5f names 6 of them. Almost all 28 unnamed ones are ordinary argument/JSON-validation errors that need no special operator handling. SIX are different: reviewer_invalid_chars, design_hash_invalid_chars, units_invalid_chars, verdict_invalid_chars, gaps_invalid_chars (assert_record_scalar, added by the R1-F1 CRITICAL fix) and model_invalid_chars (assert_record_model_scalar). None appears in 5f.",
+      "description": "`reviewer_invalid_chars` in particular is the exact signature of the forgery vector R1-F1 closed: a design-reviewer returning a `reviewer_identity` shaped like a second record's grammar. Its correct operator response differs from every other refusal 5f lists. Step C's generic clause ('A non-JSON response or a missing key is a malformed handoff; `design-rollup` in Step D rejects it with a structured error naming the offending key') would route it to 're-run Step B and re-spawn' — but a reviewer emitting a grammar-shaped identity is evidence of prompt injection through the packet, not a transient malformed handoff, and re-spawning the same reviewer against the same packet is the wrong move. It fails closed (the record is refused, nothing is written), so this is an omission rather than a defect. FIX: one bullet in the failure-modes list — `design-rollup` refuses `reviewer_invalid_chars` -> the reviewer returned an identity outside [A-Za-z0-9._+-]; design-reviewer.md's contract fixes it to the literal `design-claude`, so treat this as a suspect reviewer output rather than a retry, and surface it to the operator."
+    },
+    {
+      "id": "R3-F3",
+      "severity": "low",
+      "location": ".claude/agents/orchestrator.md:985 (the duplicate-hash failure-mode bullet)",
+      "evidence": "The bullet says the refusal 'fires ONLY when the LATEST verdict already recorded against this exact `design_hash` was itself `coherent`'. The shipped predicate reads the LATEST record OVERALL (`prior_json=$(latest_design_rollup \"$tid\")`, which returns the chronologically last DESIGN-ROLLUP regardless of which hash it names) and then tests `[ \"$prior_hash\" = \"$design_hash_arg\" ] && [ \"$prior_verdict\" = \"coherent\" ]`. So the code asks 'is the latest record AT this hash and coherent', not 'among records at this hash, was the latest coherent'.",
+      "description": "The two predicates differ only when a later record exists at a DIFFERENT hash and an earlier one at THIS hash was coherent — i.e. an artifact amended away and then amended back to byte-identical content, including its Revision log. That is close to unreachable in practice and the difference is permissive in the safe direction (a second verdict would be allowed; approve still requires the LATEST verdict to be coherent AND at the current hash, so no gate hole). Recorded because the coordinator asked specifically whether the rewritten prose describes the code more strongly than the code delivers, and this is the one place it does, however marginally. FIX if touched: 'fires only when the LATEST recorded verdict is both at this exact design_hash and itself coherent'."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

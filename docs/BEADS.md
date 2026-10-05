@@ -69,10 +69,18 @@ BLOCKED_COUNT=$(echo "$BLOCKED" | jq 'length')
 EPIC=$(bd create "Epic: User Auth" -t epic -p 1 \
     --description "Complete authentication system" --json | jq -r '.id')
 
-# Create children
-bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending
-bd create "QA: Auth tests" -p 1 --parent $EPIC -l qa
+# Create children.
+#
+# --no-inherit-labels IS LOAD-BEARING. bd copies the parent's labels onto every
+# child it creates, so a child filed under a parent that carries qa-approved,
+# qa-gate-entered or rubric-satisfied is BORN with them — asserting a review
+# nobody performed, transitively down the whole subtree
+# (claude-workflow-plugin-rmz). The bd-mcp tools (bd_create_task /
+# bd_create_epic) suppress it and verify the result; a bare CLI create does not,
+# so spell the flag here.
+bd create "Backend: Auth API" -p 1 --parent $EPIC -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: Login UI" -p 1 --parent $EPIC -l frontend,qa-pending --no-inherit-labels
+bd create "QA: Auth tests" -p 1 --parent $EPIC -l qa --no-inherit-labels
 ```
 
 **Result**:
@@ -241,8 +249,9 @@ bd create "Add dark mode" -t feature -p 2 \
 # Epic
 bd create "Epic: User Auth" -t epic -p 1 --description "..."
 
-# Child of epic
-bd create "Backend: API" -p 1 --parent $EPIC -l backend,qa-pending
+# Child of epic (--no-inherit-labels: see the epic section above — without it the
+# child inherits the parent's gate labels)
+bd create "Backend: API" -p 1 --parent $EPIC -l backend,qa-pending --no-inherit-labels
 
 # Bug discovered during work
 bd create "Bug: edge case" -t bug -p 1 \
@@ -287,8 +296,15 @@ bd close $ID --reason "Implemented and verified"
 
 ```bash
 bd doctor          # Health check
-bd sync            # Force sync
 bd info            # Database info
+
+# Ledger (`bd sync` was removed in bd 1.1.2, and no hook writes the ledger —
+# see docs/ARCHITECTURE.md SessionEnd). Prefer the plugin helper: `reconcile`
+# is safe whichever side is ahead, and BOTH are dry runs without --apply.
+bash .claude/scripts/beads-ledger.sh check              # read-only: do the two agree?
+bash .claude/scripts/beads-ledger.sh reconcile --apply  # repair, losing nothing
+bd export -o .beads/issues.jsonl                        # RAW one-way write: discards
+                                                        # anything only the ledger has
 ```
 
 ---
@@ -309,7 +325,11 @@ fi
 ### 2. Comment Check
 
 ```bash
-QA_COMMENT=$(bd show "$TASK" --json | jq -r '.comments[]? | select(test("QA APPROVED";"i"))')
+# --include-comments is required on bd >= 1.1.2 (plain show returns only a
+# comment_count); the fallback leg covers bd 0.47.x, which rejects the flag.
+QA_COMMENT=$( { bd show "$TASK" --json --include-comments 2>/dev/null || bd show "$TASK" --json; } \
+    | jq -r '(if type == "array" then .[0].comments else .comments end) // []
+             | .[].text | select(test("QA APPROVED";"i"))')
 if [ -n "$QA_COMMENT" ]; then
     QA_APPROVED=true
 fi
@@ -388,10 +408,16 @@ bd doctor
 ### "Tasks not syncing"
 
 ```bash
-# Force sync
-bd sync
+# Rewrite the JSONL ledger from the database. `bd sync` was REMOVED in bd
+# 1.1.2; this is its replacement, and it is what the plugin's
+# .claude/scripts/beads-ledger.sh wraps.
+bd export -o .beads/issues.jsonl
 
-# Check git hooks
+# Or, with staleness detection and the plugin's diagnostics:
+bash .claude/scripts/beads-ledger.sh reconcile --apply
+
+# Check git hooks. NOTE: bd's own pre-commit hook exits 0 WITHOUT exporting on
+# 1.1.2, so it is not a ledger guard — do not rely on it.
 bd hooks install
 
 # Verify .beads/ is tracked

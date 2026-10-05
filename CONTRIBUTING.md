@@ -305,6 +305,76 @@ recording session** against the SessionStart-resolved model with
 same contract, take
 that path.
 
+### Which EXISTING tests must I re-run before calling a change verified?
+
+The implied set is **not** "the specs I wrote or extended" — it is **"the
+specs that cover what I touched."** A round of QA review on D5 piece 3
+(claude-workflow-plugin-fkm.7, R2-F4) found the implementer had run every
+spec it authored (all green) but not `design-accessors.test.sh`, the spec
+covering the one existing accessor (`latest_design_unit_binding`) its new
+code had added a consumer of — which was, at that exact tree, the ONE spec
+that had gone red.
+
+A cheap, mechanical form, usable before you trust a change set as green:
+for each function or accessor your diff **calls** (not just the ones it
+defines), grep the tiers for a spec that names it, and run those too.
+
+```bash
+# Which files changed, regardless of commit state? (QA round 3, R3-F4: a
+# bare `git diff --name-only`, or even `git diff --name-only HEAD`, goes
+# quietly empty the moment the work is staged OR committed — verified
+# directly, three primitives in isolation: `printf '' | xargs grep ...`
+# never runs grep at all (rc=0, empty output); `grep -v "$(git diff
+# --name-only)"` degenerates to `grep -v ""`, which discards every line
+# (rc=1); end to end, the ORIGINAL recipe produced NO OUTPUT AT ALL against
+# a committed change — read as "nothing to run", the exact conclusion this
+# whole subsection exists to prevent. `HEAD` alone does not fully fix this:
+# it still reads empty once the change is committed, not merely staged, so
+# the base below is the merge point with the trunk branch rather than HEAD
+# — it survives uncommitted, staged, AND already-committed work alike.)
+BASE_REF=$(git merge-base main HEAD 2>/dev/null || git merge-base origin/main HEAD 2>/dev/null || echo HEAD)
+CHANGED_FILES=$(git diff --name-only "$BASE_REF" 2>/dev/null)
+if [ -z "$CHANGED_FILES" ]; then
+  echo "No changed files found against $BASE_REF -- nothing to check. If you" \
+       "expected files here, BASE_REF may not have resolved (no local" \
+       "main/origin/main); verify manually rather than trust this silence."
+else
+  CALLED=$(mktemp)
+  # The regex matches shell/TS/JS FUNCTION DEFINITIONS as well as call
+  # sites (`name(` immediately after a word boundary catches both
+  # `function name(` and a plain `name(args)` call) — over-inclusion, not
+  # under: a name your diff only DEFINES and never calls may still trigger
+  # a lookup below, which just means one extra, harmless grep. The
+  # direction that would be unsafe (a real call silently NOT extracted)
+  # is not what this over-matches.
+  printf '%s\n' "$CHANGED_FILES" | xargs grep -ohE '\b[a-z_][a-zA-Z0-9_]*\(' \
+    | tr -d '(' | sort -u > "$CALLED"
+  # For each, does an existing spec OUTSIDE this diff reference it by name?
+  while read -r fn; do
+    grep -rl "\b$fn\b" .claude/scripts/tests/*.sh .claude/tests/component/specs/*.sh \
+      2>/dev/null | grep -vxF -f <(printf '%s\n' "$CHANGED_FILES") \
+      && echo "  ^ covers $fn -- RUN IT"
+  done < "$CALLED"
+  rm -f "$CALLED"
+fi
+```
+
+This is a starting point, not a proof — a false negative (a spec that
+exercises the function indirectly, through another function it calls,
+without naming it) is possible, and the mechanical form does not replace
+reading `git diff` for what you actually touched. Treat a hit as
+mandatory; treat a miss as "keep reading the diff for what else might be
+covered," not as "nothing else needs to run."
+
+Diffing against the merge-base with `main` is deliberately wider than "just
+my task" on a long-lived branch — measured on this repo's own
+`v5/design-phase` branch, which carries many prior tasks' history, it
+surfaced 450 changed files and 1823 candidate names, noisier than a single
+task's own diff would be. That is the same "safe direction" as the
+over-inclusive regex above: more candidates checked, never fewer. If you
+know the specific commit your own task started from, diff against that
+instead for a tighter signal.
+
 ### Local commands
 
 ```bash
@@ -327,6 +397,22 @@ See `.claude/tests/README.md` § "The META-TEST convention" for placement
 and naming conventions. The CI summary surfaces META-TEST pass/fail
 counts as a distinct line so regression-injection sensitivity stays
 visible.
+
+**This is a closeout requirement, not a preference.** A new check does not
+ship without its negative control, and the four-part standard a pair must
+meet — non-vacuity, specific misbehaviour, restore control, and **execution
+of the shipped artifact** — is defined once, in `.claude/tests/README.md`
+§ "The pairing requirement". Read it before adding a check. The short
+version of the part people skip: **at least one leg must observe the shipped
+artifact running.** A three-leg triad over markdown byte-equality is a triad
+over markdown, and in the measured population not one document check reached
+that leg while not one executable check failed it. If the thing you are
+checking is prose, either drive the executable whose behaviour it describes
+or declare the check UNPAIRED and say what the control is instead — an
+honest UNPAIRED row beats a byte-comparison dressed as a pair.
+
+At closeout, every check the change added is either paired or listed as
+UNPAIRED with its reason.
 
 ### Smoke tests (still manual)
 
@@ -417,6 +503,152 @@ contribution, follow the labels convention from `CLAUDE.md`:
 Use `bd ready` to see what's available, `bd blocked` to see what's stuck,
 and the structured-notes format (`COMPLETED: ... | IN PROGRESS: ... |
 KEY DECISIONS: ...`) for everything you write to a task.
+
+### A finding discovered after a task closes opens a NEW task
+
+**Never a comment on a closed one.** The reason is mechanical, not stylistic:
+a comment on a closed task never surfaces in a ready-work query. `bd ready`
+and `bd list` exclude closed issues by default, so the finding is filed
+somewhere real, is visible to whoever wrote it, and is invisible to everyone
+who goes looking for work. It is the shape of an artifact that exists and
+does not function — which is the same defect class as a check that passes
+without verifying anything.
+
+So:
+
+```bash
+# WRONG — the finding is now unreachable from any work query
+bd comments add <closed-id> 'found afterwards: X is broken'
+
+# RIGHT — a new task, linked back to where it was found
+bd create 'X is broken (found after <closed-id> closed)' -t bug -p 1 -l <domain>
+bd dep add <new-id> <closed-id> --type discovered-from
+```
+
+Link it with `discovered-from` so the provenance survives, then put the
+evidence in the NEW task's description — not in a comment on the closed one,
+where the same invisibility applies to the evidence.
+
+This applies to review findings, post-merge regressions, and anything an
+audit turns up about already-closed work. Reopening the closed task is the
+other legitimate option when the original work was simply not finished; the
+one thing that is never right is leaving the finding as a comment nobody's
+queries will return.
+
+### A phase's scope is re-audited against the tree before that phase starts
+
+**A multi-phase plan is written before its predecessor ships, so its
+described scope drifts by the time its own phase actually starts.** A plan
+section for phase N+1 is necessarily written against phase N's *anticipated*
+output — but phase N routinely lands with a different shape than the plan
+assumed, because review rounds rename a subcommand, a validator tightens
+from strings to objects, or a decision gets resolved differently mid-round.
+Reading the plan once at write time and once at delegation time both miss
+the drift that happens in the gap between them; the check has to happen
+again, against the CURRENT tree, right before the phase that depends on it
+starts.
+
+Concrete evidence, all from one phase (D2) whose plan section was written
+before its predecessor (D1) shipped:
+
+- It named a subcommand (`design-record`) that D1 had already taken for
+  something else.
+- It described `acceptance[]` entries as strings; the validator D1 actually
+  shipped requires them to be objects.
+- It specified a refusal (`artifact_path_changed`) that D1's shipped
+  derivation makes structurally impossible to reach.
+- It told the phase to add a binding block that D1 had already shipped,
+  warn-only.
+
+None of these are planning mistakes in isolation — each was a correct
+description of D1's ANTICIPATED shape at the time the plan was written. They
+are drift, and the fix is procedural, not a demand for a better plan: before
+implementing a phase, re-derive its scope against what the tree actually
+contains, not against the plan's description of the prior phase.
+
+### Every number carries the command that produced it and the commit it was measured at
+
+Any number appearing in a `docs/RELEASE_AUDIT.md` row, a `CHANGELOG.md`
+entry, a `HANDOFF.md` verification block, a task closure or a review artifact
+must carry **(a) the command that produced it** and **(b) the commit it was
+measured at**. A reader must be able to re-run it and compare.
+
+The point is **falsifiability**. A number a reader cannot reproduce is an
+assertion, not a measurement — and the failure mode is not that the number is
+wrong, it is that nothing can tell you whether it is. Every one of the
+recorded errors that produced this rule was a *proxy reported as a
+measurement*:
+
+- A sentinel-guard count quoted as 22, then 24, then re-derived as three more
+  values depending on the grep anchor, with a census reporting a further one.
+  **Five or more counts of "the same" quantity, and not one of them stated its
+  method** — so no two were comparable and none was checkable. Each was
+  probably correct for its own anchor; that is exactly why the anchor has to
+  be written down. (The figures in that filing are reproduced here as an
+  account of the incident, not as measurements: re-deriving them is impossible
+  precisely because no command was recorded.)
+- A tier reported green while citing the log of the RED pre-sync run; the
+  green run was a different file, identified afterwards by mtime.
+- A restore hash passed into a review brief unverified, matching neither the
+  current tree nor HEAD.
+- Two grep outputs labelled "empty above = good" over output that was not
+  empty.
+- A completeness line read off a per-spec summary block rather than the run's
+  final line.
+
+It is also not only a human failure, and the good case is instructive: a
+reviewer re-measured a ledger count and got a different answer from the one
+quoted — correctly, because the ledger had moved between the two
+measurements — and *noticed*, because both sides could be re-run. (Those two
+figures are likewise an account of the incident, not measurements published
+here.) **An absolute count against a live artifact goes stale the moment it
+is written**, so the commit is not decoration; it is what turns a
+disagreement into a reproducible one.
+
+Practical form — the command and the commit, inline:
+
+```markdown
+L1: 34 specs / 34 passed / 0 failed
+  (`make test`, read off the run's FINAL `=== Summary ===` line, at 1233ea5)
+
+Sentinel-wrapped guard regions: 20
+  (`for f in $(git ls-tree -r --name-only 1233ea5 -- .claude/scripts |
+     grep '\.sh$'); do git show "1233ea5:$f"; done | grep -c '^# .* BEGIN'`
+   — line-initial `# <NAME> BEGIN` only, over .claude/scripts RECURSIVELY,
+   which includes .claude/scripts/tests/. At 1233ea5.)
+```
+
+The second example is real, and it is worth reading twice: the flat glob
+`.claude/scripts/*.sh` and the recursive walk above are **different
+populations**, and they return different numbers for a quantity that sounds
+singular. Writing the command down is what makes that visible instead of
+making it an argument.
+
+**What this is not.** It is not a demand that every number be re-measured on
+every read — a stated method plus a commit is enough, because it makes the
+number checkable. And it is **not a licence to bury numbers in prose to avoid
+the requirement**: writing "the suite is comprehensive" instead of a count
+does not satisfy this rule, it evades it, and an adjective was never
+falsifiable in the first place.
+
+### The convention above extends to inferences, not only measurements
+
+**State what was observed, then verify before relaying the conclusion.** An
+inference relayed in the voice of an observation is indistinguishable from a
+measurement to everyone downstream — the reader has no way to tell "I
+checked, and X is true" from "X seems likely, and I am stating it plainly a
+second time until it reads as fact." The two conventions are the same
+discipline pointed at two different objects: a *number* needs the command
+that produced it; a *conclusion* needs to name that it is an inference and
+say what it was checked against, not merely reasoned toward.
+
+Measured across one multi-correction arc (the v5 design phase): three of
+five orchestrator corrections were conclusions reported as observations —
+each plausible, internally consistent, and unverifiable by a downstream
+reader without independently re-deriving the inference themselves. The fix
+is the same shape as the number rule above: name what you actually looked
+at, and write "I infer X because Y" rather than a bare "X," so a reader can
+tell which one they are trusting.
 
 ## Multi-repo workflows (I8)
 

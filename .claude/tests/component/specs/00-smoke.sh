@@ -60,4 +60,4 @@ assert_json_field "smoke: json field a.b.c" \
 # Bd is real in the fixture (the wrapper just adds --no-daemon). Confirm
 # bd_show on a freshly-created task works through the wrapper.
 TID=$(cd "$FIXTURE" && bd create "Smoke test task" -t task -p 2 --json 2>/dev/null | jq -r '.id // empty' 2>/dev/null)
-assert_match "smoke: bd create returned a task id" '^[a-z0-9-]+\.' "$TID"
+assert_match "smoke: bd create returned a task id" "$BD_ID_RE" "$TID"

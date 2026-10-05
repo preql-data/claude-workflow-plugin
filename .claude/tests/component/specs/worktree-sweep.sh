@@ -344,7 +344,7 @@ assert_contains "8.5 SessionStart surfaces the sweep report as a warning" \
     "worktree-sweep at" "$SS_CTX"
 assert_contains "8.6 ...naming the manual command, not claiming cleanup happened" \
     "worktree-sweep.sh (then --apply to remove)" "$SS_CTX"
-assert_not_contains "8.7 ...and never as a bd sync failure" "bd sync failed" "$SS_CTX"
+assert_not_contains "8.7 ...and never as a Beads sync error" "Beads sync error" "$SS_CTX"
 assert_eq "8.8 SessionStart truncated the log, so the warning fires once" "0" \
     "$(wc -c < "$SWEEP_LOG" 2>/dev/null | tr -d ' ')"
 SS_CTX2=$(printf '%s' '{}' | CLAUDE_PROJECT_DIR="$FX" bash "$FX/.claude/scripts/session-start.sh" 2>/dev/null \

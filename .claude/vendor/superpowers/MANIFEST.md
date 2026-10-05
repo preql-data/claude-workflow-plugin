@@ -62,6 +62,28 @@ creative work` phrasing. It is inert here — nothing parses it, because this is
 not a registered skill — and keeping it byte-identical is what makes
 re-vendoring a one-line `curl | diff` instead of a merge.
 
+**`brainstorming/SKILL.md` content hash (v5 D3, `claude-workflow-plugin-fkm.5`).**
+`workflow-manifest.sh hash-file brainstorming/SKILL.md` over the CURRENT bytes:
+`a4b64ceabc10fc9239c257019f44481ae8e9ccaa620252438d4d6de1dac5f249`
+(measured 2026-08-18 at commit `d8f75ab`; reproduce with
+`bash .claude/scripts/workflow-manifest.sh hash-file .claude/vendor/superpowers/brainstorming/SKILL.md`
+from the repo root). This is a LIVE claim, not a golden value frozen at
+vendoring time: `vendored-skills.test.sh` section 13 asserts it against a
+fresh recompute on every run, so it stays honest about whatever bytes are
+actually on disk. Its job is narrower than the ten modifications above — it
+proves this line has not silently drifted from the file, not that the file's
+content is good (a deliberate edit that also updates this line passes just as
+cleanly as no edit at all; the ten modifications and their bans are what
+police content). `qa-gate.sh grilling-record` computes the SAME live hash at
+the moment an orchestrator's grilling dialogue concludes and writes it into
+that dialogue's own `GRILLING v1` record, so a later reader can tell whether
+the vendored method text drifted since a given grilling happened — a
+SEPARATE, orthogonal integrity claim from this line: that one is about a PAST
+record; this one is about the file's PRESENT state. Neither reads the other.
+**Update this line in the SAME change as any edit to `brainstorming/SKILL.md`**
+— including the re-vendoring procedure below, which now has an explicit step 5
+for it.
+
 ## The ten local modifications
 
 Every row is a real needle: the "upstream count" column records how many LINES
@@ -137,7 +159,12 @@ diff -u "$WORK/SKILL.md" .claude/vendor/superpowers/brainstorming/SKILL.md | les
 #    above row by row. Update every "upstream count" that moved.
 #    Then update the pin in THIS file (one occurrence) and in the test.
 
-# 5. Prove it.
+# 5. Update the content hash row above (v5 D3) — it MUST move whenever the
+#    file's bytes do, in the SAME change, or section 13 of the test below
+#    fails on exactly the drift it exists to catch.
+bash .claude/scripts/workflow-manifest.sh hash-file .claude/vendor/superpowers/brainstorming/SKILL.md
+
+# 6. Prove it.
 bash .claude/scripts/tests/vendored-skills.test.sh
 bash .claude/scripts/tests/run-tests.sh
 ```

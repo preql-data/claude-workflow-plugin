@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.6",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "847bcf8f45e90e91c579868db99e6d914f8988ddd774a34404f7ad2a9e16b5b7",
+  "risk_threshold": "high",
+  "stop_condition": "all seven R1 findings adjudicated against the post-fix tree, with targeted scrutiny of the errexit idiom now load-bearing in two HIGH fixes, the widened path-resolution ordering, and a vacuity sweep over the five new spec sections",
+  "verdict": "findings",
+  "iterations": 2,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:7971 (latest_design_unit_binding) vs writer at :7848",
+      "evidence": "The writer always emits `task=$tid` and `at <ISO timestamp>:`; the reader accepts ANY valid task token and stops after the literal ` at `, validating nothing after it. So a comment posted on task T carrying `task=OTHER ... design_hash=<64hex> at garbage` is accepted as a binding, though the writer cannot emit that there. Verified by direct comparison; not executed. Section 12 covers short hashes and the `notat` boundary word, but neither mismatched task identity nor malformed timestamp syntax.",
+      "description": "R1-F4 is PARTIALLY FIXED: hash width/class and the literal ` at ` boundary are genuinely closed, but writer/reader parity is still not exact. The reader accepting a foreign task= token is the more interesting half — a binding comment copied or mis-posted onto another task reads as valid there."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:7858 (rebind lock derivation)",
+      "evidence": "The flock-present lock is per CHECKOUT, not per shared Beads store: the lock path derives from the project dir (`.claude/.qa-tracking/.design-unit-bind-*.lock`), so two binds for the same task run from different CLAUDE_PROJECT_DIR worktrees take different lock files while addressing the SAME Beads database. Both can read 'no binding' and both append. Verified by reading the lock derivation against this repo's documented shared-DB/per-checkout-state topology; the race outcome is inferred. Section 14 uses a single fixture project dir and structurally cannot cover this.",
+      "description": "R1-F6 is PARTIALLY FIXED. The no-flock disclosure is accurate and the flock branch is sound for concurrent callers sharing one PROJECT_DIR — which is the case the spec exercises. Cross-worktree callers remain unlocked from each other, and worktree-per-unit is precisely the topology D4/D5 are building toward, so this window is on the path rather than off it."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:7907-7934 (bind write then emit) via add_comment() at :2775",
+      "evidence": "add_comment() ends in `|| log_sync_error ...`, so log_sync_error's status becomes the function's and add_comment ALWAYS returns success. Both bd comment syntaxes can fail — transient store failure, wedged daemon, schema skew, deleted task — and both binding branches then reach `emit_json ... recorded` at :7934. So ok:true is emitted with no DESIGN-UNIT record written. Verified by control-flow reading; not executed.",
+      "description": "A false success report, the j7kk class. Bounded: design-conform is fail-closed and will find no binding, so the consequence is a confusing later refusal rather than an unsound pass. NOTE the orchestrator established this is WIDER than this call site — add_comment has 17 call sites and is fail-open by documented design ('comments are non-authoritative, labels are the source of truth'), a premise v5 broke by adding comment-only record subcommands. Filed separately as claude-workflow-plugin-nod4; the local fix here should be a read-back of the predicate the downstream reader evaluates."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/design-conform.test.sh:869 (Section 10.3)",
+      "evidence": "Section 10.3 does not reach the extraction checkpoint it claims to test: its `.undeclared_n` shim pattern first matches the earlier shape-check at qa-gate.sh:8287, so execution refuses there before reaching the extraction at :8296. Verified from the exact shim patterns and the execution order.",
+      "description": "A vacuous leg — it would stay green if the extraction fallback regressed. The shipped extraction guards are themselves sound (R1-F1 is otherwise FIXED); it is only this control that proves less than it claims. Fourth instance in this project of the sweep catching a control that passes without exercising its mechanism."
+    }
+  ]
+}

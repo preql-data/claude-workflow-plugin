@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-auic",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "2b7c6261e948698a50647899c34d7ea874b8ac112a3b10db84ef2b5ffd41101d",
+  "risk_threshold": "high",
+  "stop_condition": "Every numeric claim, citation and line reference added by this change set is re-executed against the tree at 2b58370; the 10/7/0/1/18 tally reproduces via its own five scoped greps; and no surviving sentence contradicts that tally or the narrowed DP5 claim by conclusion.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": "docs/RELEASE_AUDIT.md:811 (DP5 row)",
+      "evidence": "The DP5 row asserts in bold: 'THE NARROWING IS CARRIED EVERYWHERE BATCHING IS DESCRIBED - this row, CHANGELOG.md, README.md and the release announcement - so no surface claims the impact half ships.' Measured at 2b58370: `grep -n 'l7gd\\|file-set-only\\|file-set intersection\\|graph_intersection_computed' CHANGELOG.md` returns ZERO lines. `git status --porcelain CHANGELOG.md` is empty, so CHANGELOG.md is untouched by this change set and carries none of the narrowing. CHANGELOG.md:33 still reads 'computed parallel batching that names its own degradation rather than hiding it', which discloses degradation-naming but NOT that the impact_of conjunct is deferred. The task's own description says the CHANGELOG half of the DP5 narrowing and the Slack draft are 'STILL TO COME in a later cycle'.",
+      "description": "A present-tense completeness claim in the release decision document that its own author's task description contradicts. This is the same defect family the row was narrowed to fix: asserting a conjunction (this row AND CHANGELOG AND README AND the announcement) when only part of it ships. It is load-bearing, not cosmetic - the sentence is the ledger's justification that the narrowing is honest rather than a redefinition, because 'no surface claims the impact half ships' is exactly what makes a withdrawal a withdrawal. A reader of CHANGELOG.md today is still told batching is 'computed' with no mention of the deferral. Fix: either carry the narrowing into CHANGELOG.md now, or scope the sentence to what is true today and name CHANGELOG/announcement as outstanding, with the task that will carry them."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": "README.md:174",
+      "evidence": "New text: 'a `designer` produces a design artifact and a `design-reviewer` - a mechanically distinct identity - scores it against .claude/rubrics/design.md'. Contradicted by README.md:85, 89 lines earlier in the same file: '| `design_reviewer` | `design-reviewer` | `top` | same pick as `designer`; the optional external lane routes design review to Sol via Codex when connected, which is what keeps the two from reviewing each other under the same identity'. Also contradicted by .claude/model-roles:92-98: 'designer and design_reviewer are both top by default, so on a stock install WITHOUT Codex they resolve to the same model and the design would be reviewed by its own identity. That is reported, never blocked'. And by DP2 in the very document this change set edits, which is PROVEN-WITH-CAVEAT precisely here: 'self-review is the DEFAULT on a stock, Codex-absent install until an operator acts on one of the two clearances ... \"independently reviewed\" is a claim about the steady state only after that action.'",
+      "description": "An unqualified operator-facing claim of review independence that is false on the default install, in the same file whose own model table says the two roles resolve to the same pick. The repo's vocabulary fixes the meaning of 'identity' here - the resolver emits `identity_collapse: true` and the statusline shows `!id` for exactly this state - so 'mechanically distinct identity' cannot be read as merely 'a distinct agent file'. Note the phrasing appears to be inherited from CHANGELOG.md:28 ('a distinct identity, mechanically enforced'), so the defect is a propagation onto a new surface rather than an invention, but it is newly introduced to README. Fix: qualify it the way DP2 does - distinct ROLE with read-only tools always; distinct MODEL identity only once Codex is installed or design_reviewer is pinned to a distinct class, with collapse reported at SessionStart otherwise."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": "docs/RELEASE_AUDIT.md:1080",
+      "evidence": "Added line restores DP5 into the enumeration: 'None of the caveated rows' caveats are new discoveries hidden from the phases that shipped them - `DP2`, `DP5`, `DP10` and `DP11` are each the shipping phase's own disclosed residual'. The parenthetical that immediately follows (lines 1081-1096, also new) says the opposite: DP5 'carries a NEW caveat ... That caveat is this auditing pass's own finding, not the shipping phase's', and 'Both therefore belong with `DP15`/`DP16`/`DP18` as findings by an auditing pass rather than shipping-phase disclosures.' The prior text had DP5 struck from this list (`~~`DP5`~~`); this change set un-struck it.",
+      "description": "Self-contradiction inside a single sentence, in newly added text: DP5 is simultaneously enumerated as a shipping-phase disclosure and reclassified as an auditing-pass finding. This is the same shape as the defect the previous review cycle blocked on (a corrected element with adjacent prose still asserting the opposite) and the same shape as R2-F1, which this change set was fixing. The opening universal ('None of the caveated rows' caveats are new discoveries...') is also now false for both DP5 and DP3 by the parenthetical's own admission. Fix: drop DP5 from the enumeration (leaving DP2, DP10, DP11) and soften the universal, since the parenthetical already names the exceptions."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "medium",
+      "location": ".claude/.qa-tracking/changed-files.txt",
+      "evidence": "At gate entry (08:41:47Z) the tracked change set was exactly the three files of this task, and impact-report-claude-workflow-plugin-auic.json bound change_set_hash=2b7c6261e948698a50647899c34d7ea874b8ac112a3b10db84ef2b5ffd41101d over them. During this review it grew to ten: .claude/agents/designer.md, .claude/rubrics/design.md, .claude/scripts/qa-gate.sh, .claude/scripts/review-check.sh, .claude/scripts/tests/design-unit-align.test.sh, .claude/scripts/tests/validate-completion-criteria-tests.test.sh and docs/AGENTS.md were added (302 of the tree's 447 insertions). File mtimes: this task's three at 15:33-15:35, the seven others at 15:48-15:49.",
+      "description": "Change-set contamination from the concurrently-running task the brief warned about. Not a defect in this change set's content, but it blocks the gate mechanically: the impact report's change_set_hash no longer matches the live changed-files list, so `qa-gate.sh approve` refuses (exit 2, stale impact report), and any approval written now would bind another task's work into this task's record. This artifact's reviewed_hash is deliberately the 3-file entry hash - what was actually reviewed - not the contaminated live recompute. Fix: land or revert the sibling task's files before this task is re-gated, then re-run impact-report.sh for auic."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "medium",
+      "location": "claude-workflow-plugin-auic (task record)",
+      "evidence": "`qa-gate.sh review-request-build claude-workflow-plugin-auic ...` refused with {\"ok\":false,\"error_key\":\"missing_completion_contract\",\"observations\":\"no --completion-contract-file was given and no recorded COMPLETION v1 payload could be found for claude-workflow-plugin-auic\"}. No COMPLETION v1 record exists on the task.",
+      "description": "The implementer finished without recording its F7 completion contract, so `qa-gate.sh approve` would also refuse with completion_record_missing. Reported rather than worked around, per the brief. The contract is also the independent witness the approval cross-checks the change set against, which matters more than usual here given R1-F4: with no declared files_changed on record, nothing but this artifact states which files the task was supposed to touch. Fix: the implementer records its contract via `qa-gate.sh completion-record`."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "low",
+      "location": "docs/RELEASE_AUDIT.md:811 (DP5 caveat) and README.md:394",
+      "evidence": "The caveat states \"the `plan-batches` envelope carries no worktree field (`unit_ids`, `unit_task_map`, `batches`, `manifest_path`)\". The actual envelope is constructed at epic-gate.sh:1011-1017 and has FOURTEEN keys, measured at 2b58370 with: sed -n \"1011,1017p\" .claude/scripts/epic-gate.sh | grep -oE \"[a-z_]+:\" | wc -l -> 14. They are: ok, subcommand, epic_id, parallel_safe, degradation_reason, observations, design_hash, graph_intersection_computed, graph_degradation_reason, unit_ids, unresolved_unit_ids, unit_task_map, batches, manifest_path.",
+      "description": "The parenthetical reads as an enumeration of the envelope but lists four of its keys, omitting unresolved_unit_ids among others. The load-bearing half is verified true - `grep -c -i worktree .claude/scripts/epic-gate.sh` returns 0, so there is genuinely no worktree field - so this does not affect the conclusion. Raised only because the ledger's own newly adopted convention rule 1 is about citations that prove something adjacent to what they appear to prove. Fix: mark the list as partial ('e.g.') or complete it."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

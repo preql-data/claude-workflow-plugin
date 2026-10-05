@@ -1,0 +1,57 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-ishe",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "50d59bb74a7801caa24e05f47d03e43a231d659fde586303834736d637f300a6",
+  "risk_threshold": "high",
+  "stop_condition": "The new shipped disclosure in workflow-doctor.sh is shown CORRECT by end-to-end measurement on both the OK and the DRIFT arm (shim parse, fallback reachability, agreement between live_bd_ver and live_bd_path); every pre-existing grep anchor over the beads check's .detail and .fix is shown intact repo-wide with a positive control on each search; the new harness dump is OBSERVED RUNNING on its failure path and shown unable to fail or hang the suite or write into the repo; the two manifest rows are shown to match the files' sha256 and the manifest to regenerate byte-for-byte; and no finding remains that makes a shipped claim FALSE or breaks a check.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/workflow-doctor.sh:1442-1450 and .claude/scripts/tests/workflow-doctor.test.sh:1325-1396",
+      "evidence": "assert_ CALL SITES ARE UNCHANGED BY THIS COMMIT. Measured at ed9ea91: `grep -cE '^[[:space:]]*assert_'` gives 221 on .claude/scripts/tests/workflow-doctor.test.sh and 221 on `git show 32b12b2:.claude/scripts/tests/workflow-doctor.test.sh`. All 58 added spec lines are printf diagnostics. `grep -n 'assert_[a-z_]*' <spec> | grep -i 'measured|binary'` returns NOTHING; positive control on the same input with the same invocation shape, `... | grep -i 'validated set'`, returns lines 1318/1320/1400, so the search works. SILENT-DEGRADATION MEASUREMENT: the shim parse `sed -n 's|^exec \\(.*\\) \"$@\"$|\\1|p'` is coupled to mk_bd_shim's `printf 'exec %s \"$@\"\\n'` (workflow-doctor.sh:561). Fed a file whose exec line does not match that exact shape, sed prints nothing and exits 0 (measured against `exec /some/bd \"$@\" # trailing comment` -> empty, rc 0; against a missing file -> empty). `_bd_shim_target` is then empty, the `&&` does not fire, and live_bd_path stays `$WORKDIR/bin/bd` -- an mktemp path deleted when the doctor exits. No error, no marker, no assertion goes red. The repo's six sibling parsers of the same construct (.claude/tests/component/specs/qa-gate.sh:498,805,1125,1228; verify-before-stop.sh:1723; approve-idempotency.sh:443) all use the more tolerant `s/^exec \\(.*\\) \"\\$@\".*/\\1/p` plus `tr -d \"\\\"'\"` plus `head -1`, because the component tier's own mk_bd_shim (.claude/tests/component/lib/shim.sh:124) writes `printf 'exec %q \"$@\"\\n'` -- %q, not %s. The new parse is the only one of the seven anchored strictly.",
+      "description": "The disclosure is CORRECT today -- I verified it end to end on both arms (see the record's notes). The finding is about durability, not correctness: the half that carries the actual answer (`-> /Users/edk0/.local/bin/bd`) is produced by a parse coupled to another function's printf format, with zero assertions pinning either side. A change to mk_bd_shim's format -- including the obvious future hardening of %s to %q, which would fix the pre-existing space-in-path break in that shim -- degrades the disclosure to naming only a temp wrapper, silently and greenly. That is the same 'a check that did not run looks like one that passed' shape the task exists to close, relocated one level down. Does NOT block v5.0.0 under the stated stop rule: it makes no shipped claim false today and breaks no check. v5.0.1 follow-up."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "low",
+      "location": ".claude/scripts/tests/workflow-doctor.test.sh:1332-1334",
+      "evidence": "THE CUT FIRES TODAY, measured, not projected. Running the SHIPPED spec with CLAUDE_PROJECT_DIR pointed at a symlink mirror whose only real file is a workflow-doctor.sh carrying DOCTOR_BD_SCHEMA_VALIDATED=\"9.9.9:99\" (non-vacuity confirmed: repo line 244 reads \"1.1.2:53 1.3.0:66\", mirror line 244 reads \"9.9.9:99\"; `bash -n` clean; `cmp -s` differs), the 8a control failed and the new line printed at 317 characters -- exactly 300 after its 17-character `  [8a] measured: ` prefix. It ends `; store: /var/folders/qr/c0gwdny174v7dbphnj1l7w`, a path cut mid-token that reads as complete. NOTHING IS ACTUALLY LOST: the pre-existing `observed pair` line immediately below carries the identical detail in full at 427 characters (395 of content, under its own cut -c1-400), ending `.../target-schema-pin/.beads/embeddeddolt/beads]`, and the new `embedded-Dolt stores under it:` dump prints the same store path a third time. The `Measured binary:` half survives the cut because it precedes `store:` in the detail string.",
+      "description": "This is paj9-r2's R1 finding R2-F5 (severity info, on the sibling cut -c1-400 at line 1335) with its contingency discharged. That record justified info on the grounds that 'today's detail is a single ~130-char line so it cannot bite'; the DRIFT detail is now ~380 characters because this commit appended `[measured binary: ...; store: ...]` to it, and the new line's cap is 300 rather than 400, so it bites on the first failing run. Kept at low rather than raised, because the truncated field is duplicated in full on the two adjacent lines and the field this commit exists to disclose is not the one cut. Does NOT block v5.0.0. v5.0.1 polish, best taken together with R2-F5 so one marker convention covers both lines."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": ".claude/scripts/workflow-doctor.sh:1443-1448",
+      "evidence": "SHIM RESOLUTION IS SINGLE-HOP BY CONSTRUCTION. The `-> target` expansion is guarded by `[ \"$live_bd_path\" = \"$WORKDIR/bin/bd\" ]`, so it unwraps the doctor's own wrapper and stops. If the binary behind it is itself a wrapper the chain is not followed. This is reachable in this repo today: .claude/tests/component/lib/shim.sh's mk_bd_shim installs a `bd` wrapper at `<fixture>/bin/bd` and mk_fixture prepends that directory to PATH, so a doctor run inside a component fixture resolves real_bd to that wrapper and would report `<workdir>/bin/bd -> <fixture>/bin/bd`, naming a script rather than the binary that answered. SEPARATELY MEASURED, and the reason this is low rather than info: `command -v` reports the PATH entry, never the symlink target -- with `ln -sf <real>/bd <link>/bd`, `env PATH=<link>:... bash -c 'command -v bd'` printed the <link> path while the file executed was <real>. Homebrew, asdf, mise and the GitHub toolcache all resolve bd through exactly that shape.",
+      "description": "Every rendering here is TRUE -- the named path is genuinely what resolved -- so this is a precision bound, not an error, and the harness dump already compensates on the failure path by printing `type -a` plus each candidate's own --version. It is recorded because the bound sits directly on the wyt3 question: in a lane where bd reaches PATH through a symlink or a second wrapper, the one new line an operator will read names the link, and closing the gap still needs `ls -l` or `readlink -f`. Does NOT block v5.0.0. v5.0.1 follow-up."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "info",
+      "location": ".claude/scripts/tests/workflow-doctor.test.sh:1378-1381",
+      "evidence": "MEASURED, with a control. The dump runs `\"$_bd_cand\" --version` unbounded for EVERY bd `type -aP` returns, including rivals the doctor itself never executes. With a second bd on PATH that sleeps 6s before answering, the extracted block took 6s; with the same rival removed from PATH, 0s. Both candidates were still enumerated correctly. The exposure is bounded by run-tests.sh's SPEC_TIMEOUT_S (default 900, and its header states a timeout is 'a FAILURE with a distinct reason -- never a pass'), so a genuinely wedged rival costs one spec's wall clock and fails loudly rather than hanging the tier. The doctor's own `bd --version` at workflow-doctor.sh:1429 is likewise unbounded and pre-existing; what is new is executing binaries the doctor never runs.",
+      "description": "Recorded for completeness against the brief's hang question, not as a defect. The answer to 'can the harness dump fail or hang the suite' is no: it is failure-path-only, every host-shape I constructed exits 0, and the worst case is a bounded spec timeout that counts as a failure."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "info",
+      "location": "README.md:379 -- OUTSIDE the reviewed change set, recorded as a pointer only",
+      "evidence": "README.md:379 reads `| 1.1.2 | 53 | validated -- the CI floor (`l1-unit`, every run) |`. ed9ea91's own commit message states the contradicting conclusion: 'on current evidence the floor lane has never measured the floor -- before 1.3.1 it would have observed 1.3.0:66, a set member, and passed. No CHANGELOG, README or announcement may claim CI validates the bd 1.1.2 floor until that lane is shown to measure it.' The row predates this commit (it is not in `git diff 32b12b2 ed9ea91`). I did not re-derive the CI evidence itself -- the A/B re-run on 2b58370 and the bd-max comparison are CI-side and out of my reach; this records only that the repo contains a claim its own release commit says may not be made.",
+      "description": "Out of scope for this change set and not attributable to this diff. Surfaced because it is this commit's own stated consequence and none of the four filed follow-ups appears to cover it: cx3s is the seven fixture shims, 5d20 is design-review-record 8.17g, iipo is the Linux tier shipping no dolt, a3pa is the pre-push bar. Orchestrator's call whether v5.0.0 ships with that row standing."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "info",
+      "location": ".claude/scripts/workflow-doctor.sh:1415 -- pre-existing line inside an in-scope FILE, not inside the diff",
+      "evidence": "The comment reads 'READ-ONLY: `bd version` never writes, and the schema read is a direct `dolt sql` SELECT against the schema_migrations table', and the check header claims the `bd doctor` WAL checkpoint is 'the only file change a full run makes anywhere in the target'. MEASURED against dolt 2.3.0: running ONLY `cd <store> && dolt sql -r csv -q 'SELECT COALESCE(MAX(version),0) FROM schema_migrations'` between two `find | stat` snapshots of a freshly `bd init --database beads`'d fixture CREATED eleven new paths under `<store>/.dolt/stats/` (config.json, noms/LOCK, noms/journal.idx, noms/manifest, noms/oldgen, noms/vvvv..., repo_state.json, temptf and their parents) and moved four mtimes. Positive control: the same snapshot instrument fired on a deliberate `touch`. The line is present at 32b12b2 (`git show 32b12b2:... | grep -n 'READ-ONLY'` -> line 1415), so it is pre-existing. REAL-WORLD IMPACT IS NIL: `.beads/.gitignore:11` ignores `embeddeddolt/`, and this repo's store already has `.dolt/stats`, which is why a full suite run left `git status --porcelain` empty.",
+      "description": "Not a finding against this change set -- the diff neither introduces nor relies on the claim, and the new harness dump's own dolt call lands in an mktemp fixture that is cleaned up on exit. Recorded because the same SELECT runs against the REAL target in the one unsandboxed check, and the surrounding comment is the document a future reader will trust when deciding what the doctor touches."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

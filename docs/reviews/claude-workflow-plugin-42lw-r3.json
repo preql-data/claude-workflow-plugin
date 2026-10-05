@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-42lw",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "f94414d37bd078f69f3922b4c0ba8fbeff3a0f2fdc0daac9469aa4df369e006c",
+  "risk_threshold": "medium",
+  "stop_condition": "Read the R3 request first, then both persisted prior artifacts and the relevant release code/history. R2-F1 is resolved: at c5ba7cc the reconcile-subtracted.txt truncation command at qa-gate.sh:1273 executes before every return, including :1385-1387, :1522-1524 and :1601-1603, while changed-files.txt is appended only after non-empty to_add at :1615-1625; the call at :5642 precedes the refusal at :6990 and durable approval write at :7784. R2-F3 is resolved: c5ba7cc:session-start.sh:618-625 supplies the missing revision qualifier, and the bare filename follows this changelog's citation convention. R2-F2 is resolved: direct canonical hashing reproduced f609a8a6... for the one-path CHANGELOG.md set, while git diff 91bfcc8^ 91bfcc8 -- CHANGELOG.md reproduced the separately stored 13139e50... content digest; qa.md:398,420, codex-review.sh:179-190,539 and docs/HOOKS.md:1748-1755 support the corrected membership/content distinction. Diffing the preserved pre-edit R1 file against the current file showed changes only to reviewed_hash and orchestrator_envelope; findings[] and stop_condition are byte-identical. The current R1 file is byte-identical to the staged corrected scratch copy. The persisted R2 artifact faithfully reproduces the returned R2 object, including its stop condition, three findings and reviewed_hash 70377816.... Both artifacts parse and pass review-check.sh validate-artifact. Direct path-list hashing reproduced 70377816... for the two-file set and f94414d3... for the current three-file set; git diff --check passed. Beyond the requested fixes, checked the release tag, named commits, changed-path counts, release manifest, and current request evidence. Local v5.0.0 peels to c5ba7cc and origin/v5/design-phase is locally recorded at 91bfcc8. Live git ls-remote checks for the tag and branch both failed rc=128 because github.com DNS could not resolve, and gh pr view 5 failed to connect to api.github.com, so remote tag absence and PR #5 were not independently verified. bd show for j4pe, cfa3 and robt was denied when it attempted .beads.gate.lock and the embedded database LOCK; the exported ledger contains none of those records, so current task statuses remain unverified. The full workflow-manifest.sh generate | cmp check was denied because its mktemp call returned Operation not permitted, and workflow-manifest.sh --help was denied creating its here-document temporary file; the manifest finding instead uses direct stored/current/tag SHA-256 comparisons that require no temporary files. Git repeatedly reported Operation not permitted while attempting /tmp/xcrun_db-* cache files, although its read-only operations completed and returned usable results. No suite was run and no files were modified.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "medium",
+      "location": "CHANGELOG.md:2380-2382; manifests/v5.0.0.sha256",
+      "evidence": "The changelog says the three fixes are folded into 5.0.0 and this branch is the release, but `git diff --exit-code c5ba7cc 91bfcc8 -- manifests/v5.0.0.sha256` returned 0: the frozen manifest was never refreshed after the post-tag release-surface changes. Direct SHA-256 comparisons at HEAD 91bfcc8 show manifest mismatches for all six sampled changed, manifested files: `.claude/agents/orchestrator.md`, `.claude/commands/workflow-doctor.md`, and `.claude/scripts/{model-select,qa-gate,session-start,workflow-doctor}.sh`. Every stored hash instead exactly matches that file's c5ba7cc bytes. This conflicts with docs/plans/v5-design-phase-plan.md:763-766, which requires generating the v5 manifest after all surface changes.",
+      "description": "The current release artifacts still describe the pre-fix tag, so the fixes are not yet coherently folded into v5.0.0. Regenerate and deterministically verify the frozen manifest against the final release branch and recreate/move the still-local tag before publication, or describe these as post-tag unreleased fixes instead."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "medium",
+      "location": "42lw-r3-request.json:impact_report.change_set_hash, impact_report.files",
+      "evidence": "The request's authoritative change_set_hash is f94414d3..., which independently reproduces from CHANGELOG.md plus the R1 and R2 artifact paths. Its embedded impact report still carries 70377816..., the independently reproduced hash of only CHANGELOG.md plus R1, and its files array omits the R2 artifact. The on-disk report is identically stale even though changed-files.txt now contains R2. `review-check.sh validate-request` nevertheless returned `ok:true` because it checks the top-level hash's shape but does not cross-check the embedded report.",
+      "description": "Regenerate the impact report after the R2 artifact's tracked Write and rebuild the request so its report covers the same three-member set as f94414d3.... Disclosure of the earlier hook bypass does not make the stale two-file impact evidence current."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

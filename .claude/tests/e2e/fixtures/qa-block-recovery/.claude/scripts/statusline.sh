@@ -15,14 +15,19 @@
 #
 # Wired via .claude/settings.json `statusLine` field. Per the Claude Code
 # docs (https://docs.claude.com/en/docs/claude-code/statusline), the script
-# receives a JSON envelope on stdin describing the session; we only need
-# project-local state, so we drain stdin and ignore the body. We still cat
-# stdin to keep the data flowing in case future versions enforce a read.
+# receives a JSON envelope on stdin describing the session.
+#
+# v5.0.0 Phase D0: that envelope is now READ rather than drained, because it
+# is THE ONLY PLACE the live session model is observable. session-start.sh
+# never reads stdin, so the session-model guard has nowhere else to live — see
+# the SESSION-MODEL GUARD block below.
 
 set -e
 
-# Drain stdin (don't error if there's nothing).
-cat >/dev/null 2>&1 || true
+# Capture stdin (don't error if there's nothing, and never block a render on
+# it). Everything downstream treats an empty or unparseable envelope as "no
+# information", never as evidence of anything.
+STDIN_JSON=$(cat 2>/dev/null || true)
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 QA_TRACKING_DIR="$PROJECT_DIR/.claude/.qa-tracking"
@@ -33,6 +38,22 @@ ORCH_AGENT_FILE="$PROJECT_DIR/.claude/agents/orchestrator.md"
 # model-select.sh apply. Artifact-first render; absent/unparseable falls
 # back to today's single orchestrator.md pin (visual v3.5 parity).
 ROLES_ARTIFACT="$QA_TRACKING_DIR/model-roles-resolved.json"
+# v5.0.0 Phase D0 state files. All three are READ here; only the drift record
+# is written, and only when its content would change (see the guard block).
+ESCALATION_STATE="$QA_TRACKING_DIR/implementer-escalation.json"
+SESSION_DRIFT_FILE="$QA_TRACKING_DIR/session-model-drift.json"
+
+# ROLE_ORDER — the FIXED statusline render order and its short labels, as
+# `<role>:<label>` pairs. Order is load-bearing: it decides which group is
+# printed first (a group's position is its FIRST member's position here), so
+# it must match ALL_ROLES in model-select.sh.
+ROLE_ORDER="designer:des design_reviewer:dsr orchestrator:orch implementer:impl reviewer:rev"
+
+# MAX_GROUPS — how many distinct model groups are printed before the render
+# collapses the tail into ` +<k> more`. The statusline shares one line with
+# the task id, the QA state, the rubric state and the file count, so this is a
+# width budget, not a preference.
+MAX_GROUPS=3
 
 # Hotfix vlp.1: read the active model pin from orchestrator.md frontmatter
 # (no network). All seven agent pins are kept in lockstep by
@@ -62,45 +83,269 @@ short_id() {
     printf '%s' "$id"
 }
 
-# compute_model_suffix — the " • model: ..." / " • orch:.. impl:.. rev:.."
-# segment appended to every statusline branch.
+# ---------------------------------------------------------------------------
+# SESSION-MODEL GUARD (v5.0.0 Phase D0)
 #
-# Artifact-first: when model-roles-resolved.json parses and carries all
-# three role ids, render the compact role view. When all three roles are
-# equal AND the reviewer lane is claude, collapse to the single-model shape
-# (` • model: <short>`) for visual v3.5 parity; otherwise render the triple
-# (` • orch:<short> impl:<short> rev:<short|sol>`, where a non-claude lane
-# shows the literal `sol`). Artifact missing/unparseable -> today's
-# orchestrator.md-pin fallback, byte-for-byte unchanged.
-compute_model_suffix() {
-    if [ -f "$ROLES_ARTIFACT" ] && command -v jq >/dev/null 2>&1 \
-        && jq -e . "$ROLES_ARTIFACT" >/dev/null 2>&1; then
-        local orch impl rev lane
-        orch=$(jq -r '.roles.orchestrator // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
-        impl=$(jq -r '.roles.implementer // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
-        rev=$(jq -r '.roles.reviewer // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
-        lane=$(jq -r '.reviewer_lane // "claude"' "$ROLES_ARTIFACT" 2>/dev/null || true)
-        [ -z "$lane" ] && lane="claude"
-        if [ -n "$orch" ] && [ -n "$impl" ] && [ -n "$rev" ]; then
-            if [ "$orch" = "$impl" ] && [ "$impl" = "$rev" ] && [ "$lane" = "claude" ]; then
-                printf ' • model: %s' "$(short_id "$orch")"
-                return
-            fi
-            local rev_disp
-            if [ "$lane" = "claude" ]; then
-                rev_disp=$(short_id "$rev")
-            else
-                rev_disp="sol"
-            fi
-            printf ' • orch:%s impl:%s rev:%s' \
-                "$(short_id "$orch")" "$(short_id "$impl")" "$rev_disp"
-            return
+# The root session IS the orchestrator seat, so it should run whatever the
+# `orchestrator` role class resolved to. Nothing anywhere else can check that:
+# the live session model appears ONLY in this script's stdin envelope, and
+# session-start.sh — the natural place for a warning — never reads stdin.
+#
+# So the comparison happens here and the RESULT is persisted, for
+# session-start.sh's Warning 8 to re-validate and report next session.
+#
+# READ-COMPARE-WRITE ONLY. This script runs on EVERY render. Writing a
+# timestamped record each time would churn the file dozens of times a minute
+# and make its mtime meaningless, so the record is rewritten only when the
+# (expected, live) pair it holds would actually change, and removed only when a
+# real, completed comparison says there is no drift.
+#
+# NEVER BLOCKS, and never guesses. An absent envelope, an absent `.model.id`,
+# an absent artifact or a missing jq all mean "no comparison was possible" —
+# which is NOT the same as "no drift", so those paths leave any existing record
+# exactly as they found it rather than clearing it on no evidence.
+#
+# THE COMPARISON IS BY MODEL IDENTITY, NOT BY ID STRING (QA R1-F4). It shipped
+# as literal string equality, and that made the 1M-context variant of the
+# CORRECT model read as drift forever: a session on `claude-fable-5[1m]` against
+# a resolved `claude-fable-5` lit `!sess` permanently and printed a fix line
+# telling the operator to move to a SMALLER context window. Reproduced by
+# feeding the shipped statusline that envelope; the repo's own drift record
+# carried exactly that shape. A guard that is permanently lit for a reason the
+# operator should not act on is a guard nobody reads.
+#
+# So a trailing bracketed context-window marker (`[1m]`) is separated from the
+# base id, and the rule is deliberately ASYMMETRIC — see session_model_matches.
+# A flat "strip the suffix from both sides" would also have deleted a TRUE
+# positive: pick_best sorts by `_ctx` DESC, so the resolver CAN legitimately
+# resolve to `claude-fable-5[1m]`, and a session on the bare id then really is
+# not on what was resolved — with an actionable fix line naming the variant.
+#
+# Residual, stated rather than papered over: an id whose SHAPE differs from the
+# resolved one in any other way (a dated variant, an alias) is still reported as
+# drift. That remains the honest answer — this hook cannot know an alias resolves
+# to the same weights — and the fix line names the exact id, so acting on it is
+# one command either way.
+# ---------------------------------------------------------------------------
+
+# live_session_model — the session model id from the stdin envelope, or empty
+# when there is no envelope, no jq, or no `.model.id`.
+live_session_model() {
+    [ -n "$STDIN_JSON" ] || { printf ''; return 0; }
+    command -v jq >/dev/null 2>&1 || { printf ''; return 0; }
+    printf '%s' "$STDIN_JSON" | jq -r '.model.id // empty' 2>/dev/null || printf ''
+}
+
+# session_model_matches <expected> <live> — 0 when <live> IS the model
+# <expected> names, 1 when it is a different model. Never writes anything.
+#
+# The rule, in the order it is applied:
+#   1. identical ids                      -> match (the common case);
+#   2. different BASE ids                 -> drift (a different model);
+#   3. same base, and <expected> named NO variant -> match. The resolver
+#      expressed no context-window preference, so a session on a variant of
+#      that model cannot be violating one. THIS IS THE R1-F4 CASE;
+#   4. same base, and <expected> DID name a variant -> drift. `pick_best`
+#      sorts `_ctx` DESC, so a resolved `…[1m]` was a deliberate pick and a
+#      session on the bare id (or another variant) is genuinely not on it —
+#      and the fix line names the variant, which is actionable.
+#
+# Rule 4 is why this is not the flat both-sides strip: that would have made
+# rules 3 and 4 the same answer and deleted a true positive to fix a false one.
+#
+# "Variant" is exactly a trailing bracketed marker (`claude-fable-5[1m]`), the
+# only shape the runtime and the /v1/models listing use — short_id already
+# treats it as one. `${x%%\[*}` is the bash 3.2-safe way to cut at the first
+# `[`; the backslash is required, or the `[` opens a bracket expression.
+session_model_matches() {
+    local expected="$1" live="$2" exp_base live_base
+    if [ "$expected" = "$live" ]; then
+        return 0
+    fi
+    exp_base="${expected%%\[*}"
+    live_base="${live%%\[*}"
+    if [ "$exp_base" != "$live_base" ]; then
+        return 1
+    fi
+    if [ "$exp_base" = "$expected" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# evaluate_session_model <expected-orchestrator-id> — print "1" when the live
+# session model differs from <expected>, "" otherwise (including every
+# cannot-compare case). Maintains $SESSION_DRIFT_FILE per the contract above.
+evaluate_session_model() {
+    local expected="$1" live rec_expected rec_live
+    live=$(live_session_model)
+
+    if [ -z "$live" ] || [ -z "$expected" ]; then
+        # No comparison was possible. Leave any existing record alone.
+        printf ''
+        return 0
+    fi
+
+    if session_model_matches "$expected" "$live"; then
+        # A completed comparison found no drift: a stale record is now wrong,
+        # so clear it — but only if one exists (no write on the common path).
+        # This is also the path that clears a record left by the pre-R1-F4
+        # comparison, so an operator who was told to shrink their window and
+        # ignored the advice gets the false record removed on the next render.
+        [ -f "$SESSION_DRIFT_FILE" ] && rm -f "$SESSION_DRIFT_FILE" 2>/dev/null
+        printf ''
+        return 0
+    fi
+
+    # Drift. Rewrite only when the recorded pair differs from this one.
+    rec_expected=""
+    rec_live=""
+    if [ -f "$SESSION_DRIFT_FILE" ] && command -v jq >/dev/null 2>&1; then
+        rec_expected=$(jq -r '.expected // empty' "$SESSION_DRIFT_FILE" 2>/dev/null || true)
+        rec_live=$(jq -r '.live // empty' "$SESSION_DRIFT_FILE" 2>/dev/null || true)
+    fi
+    if [ "$rec_expected" != "$expected" ] || [ "$rec_live" != "$live" ]; then
+        mkdir -p "$QA_TRACKING_DIR" 2>/dev/null || true
+        if jq -n --arg e "$expected" --arg l "$live" \
+            --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{expected:$e, live:$l, observed_at:$ts,
+              fix:("/model " + $e + "   (or: make session)")}' \
+            > "$SESSION_DRIFT_FILE.tmp" 2>/dev/null; then
+            mv "$SESSION_DRIFT_FILE.tmp" "$SESSION_DRIFT_FILE" 2>/dev/null || true
+        else
+            rm -f "$SESSION_DRIFT_FILE.tmp" 2>/dev/null || true
         fi
     fi
-    # Fallback: today's single orchestrator.md pin (unchanged).
+    printf '1'
+    return 0
+}
+
+# model_flags <identity-collapse> <session-drift> — the trailing ` !esc !id
+# !sess` markers, in that fixed order. Empty when none apply.
+#
+#   !esc   a per-unit implementer escalation is ACTIVE (the state file exists),
+#          so the implementer lane is not on its configured strategy.
+#   !id    designer and design_reviewer collapsed to one identity.
+#   !sess  the live session model differs from the resolved orchestrator id.
+model_flags() {
+    local collapse="$1" drift="$2" out=""
+    [ -f "$ESCALATION_STATE" ] && out="$out !esc"
+    [ "$collapse" = "true" ] && out="$out !id"
+    [ "$drift" = "1" ] && out="$out !sess"
+    printf '%s' "$out"
+}
+
+# compute_model_suffix — the " • model: ..." / " • <labels>:<id> ..." segment
+# appended to every statusline branch.
+#
+# Artifact-first, FIVE roles since D0. Rules, in order:
+#   1. All present roles share one display value AND both lanes are claude ->
+#      collapse to ` • model: <short>` (visual v3.5 parity).
+#   2. Otherwise group roles by identical display value, join each group's
+#      labels with `+`, and print the groups space-separated in fixed
+#      ROLE_ORDER (a group's position is its first member's position).
+#   3. At most MAX_GROUPS groups are printed; the tail becomes ` +<k> more`.
+#   4. Render over the roles PRESENT in `.roles` — so a leftover THREE-role v4
+#      artifact renders exactly as it did before, with no upgrade step. This is
+#      the rule that keeps the statusline honest across a version boundary:
+#      absent is absent, not an empty label.
+#   5. Flags are appended last, in the fixed order `!esc !id !sess`.
+#
+# A non-claude CODE-review lane substitutes the literal `sol` for that lane's
+# id, because on that lane the reviewing identity genuinely is not the Claude
+# model the pin names -- codex-review.sh drives it.
+#
+# THE DESIGN LANE IS DIFFERENT AND DOES NOT DO THIS (claude-workflow-plugin-
+# yvpe). No script drives design review through Codex, so a non-claude DESIGN
+# lane still means a Claude reviewer; printing `sol` there named a reviewer
+# that does not exist and, worse, displayed the designer and its reviewer as
+# two distinct identities precisely when they resolve to the same model.
+# `design_reviewer` therefore always renders its resolved id.
+# Artifact missing/unparseable -> today's orchestrator.md-pin fallback.
+compute_model_suffix() {
+    local collapse="false" drift="" flags=""
+    if [ -f "$ROLES_ARTIFACT" ] && command -v jq >/dev/null 2>&1 \
+        && jq -e . "$ROLES_ARTIFACT" >/dev/null 2>&1; then
+        local rlane dlane orch_id pair role label id disp
+        rlane=$(jq -r '.reviewer_lane // "claude"' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        dlane=$(jq -r '.design_reviewer_lane // "claude"' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        [ -z "$rlane" ] && rlane="claude"
+        [ -z "$dlane" ] && dlane="claude"
+        if [ "$(jq -r '.identity_collapse // false' "$ROLES_ARTIFACT" 2>/dev/null || true)" = "true" ]; then
+            collapse="true"
+        fi
+        orch_id=$(jq -r '.roles.orchestrator // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
+        drift=$(evaluate_session_model "$orch_id")
+        flags=$(model_flags "$collapse" "$drift")
+
+        # Group in fixed order. Parallel indexed arrays, not an associative
+        # array: bash 3.2 is the floor and has none.
+        local g_values=() g_labels=() i found total out
+        for pair in $ROLE_ORDER; do
+            role="${pair%%:*}"
+            label="${pair##*:}"
+            id=$(jq -r --arg r "$role" '.roles[$r] // empty' "$ROLES_ARTIFACT" 2>/dev/null || true)
+            [ -n "$id" ] || continue
+            case "$role" in
+                reviewer)        [ "$rlane" = "claude" ] && disp=$(short_id "$id") || disp="sol" ;;
+                # design_reviewer ALWAYS renders the resolved Claude id, never
+                # `sol` (claude-workflow-plugin-yvpe). The `reviewer` arm above
+                # is correct because the CODE-review Sol lane is genuinely
+                # wired (codex-review.sh drives it). There is NO design
+                # equivalent: codex-review.sh has no design handling, and
+                # design-reviewer.md instructs the reviewer to emit
+                # `design-claude` unconditionally because it cannot read this
+                # lane. Rendering `sol` here showed the designer and its
+                # reviewer as two distinct identities at exactly the moment
+                # they are the SAME model -- asserting the opposite of the
+                # truth, continuously, on screen. This arm was copied from the
+                # `reviewer` arm, where the conditional does hold.
+                design_reviewer) disp=$(short_id "$id") ;;
+                *)               disp=$(short_id "$id") ;;
+            esac
+            found=-1
+            i=0
+            while [ "$i" -lt "${#g_values[@]}" ]; do
+                if [ "${g_values[$i]}" = "$disp" ]; then
+                    found=$i
+                    break
+                fi
+                i=$((i + 1))
+            done
+            if [ "$found" -ge 0 ]; then
+                g_labels[found]="${g_labels[found]}+$label"
+            else
+                g_values+=("$disp")
+                g_labels+=("$label")
+            fi
+        done
+
+        total=${#g_values[@]}
+        if [ "$total" -gt 0 ]; then
+            if [ "$total" -eq 1 ] && [ "$rlane" = "claude" ] && [ "$dlane" = "claude" ]; then
+                printf ' • model: %s%s' "${g_values[0]}" "$flags"
+                return 0
+            fi
+            out=""
+            i=0
+            while [ "$i" -lt "$total" ] && [ "$i" -lt "$MAX_GROUPS" ]; do
+                out="$out ${g_labels[$i]}:${g_values[$i]}"
+                i=$((i + 1))
+            done
+            if [ "$total" -gt "$MAX_GROUPS" ]; then
+                out="$out +$((total - MAX_GROUPS)) more"
+            fi
+            printf ' •%s%s' "$out" "$flags"
+            return 0
+        fi
+    fi
+    # Fallback: today's single orchestrator.md pin (unchanged). No artifact
+    # means no resolved orchestrator id to compare a session model against, so
+    # only the file-derived !esc flag can apply here.
+    flags=$(model_flags "false" "")
     local pin
     pin=$(read_model_pin)
-    printf ' • model: %s' "${pin:-(no model pin)}"
+    printf ' • model: %s%s' "${pin:-(no model pin)}" "$flags"
 }
 
 # ---------------------------------------------------------------------------

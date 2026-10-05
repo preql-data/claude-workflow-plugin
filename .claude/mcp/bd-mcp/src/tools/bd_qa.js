@@ -269,6 +269,25 @@ export function registerQaTools(server) {
                 "approve leaves behind). If a Stop still blocks after a no-op, re-run " +
                 "`impact-report.sh <id>` and approve again; that re-persists the report so the " +
                 "comparison sees the current change set.\n\n" +
+                "REFUSES with error_key change_set_reconstructed (94d.1) when changed-files.txt was " +
+                "absent-or-empty at reconcile time, the rebuild from `git status` produced a " +
+                "NON-EMPTY set, and it also dropped git-visible path(s) as already-baselined — real " +
+                "work being certified over a proven subset of the working tree. The dropped paths " +
+                "are named in the error and in .claude/.qa-tracking/reconcile-subtracted.txt. THIS " +
+                "TOOL HAS NO BYPASS PARAMETER: read those paths, and if they are genuinely " +
+                "pre-existing dirt rather than lost work, proceed through the shell with a recorded " +
+                "reason — `qa-gate.sh approve <id> --accept-reconstructed '<reason>' '<summary>'`. " +
+                "Same for the older --no-impact-report / --no-review bypasses, and for --no-completion " +
+                "(refuses with completion_record_missing when no COMPLETION v1 record exists).\n\n" +
+                "Since v5 D2, ALSO REFUSES (error_key one of no_design_attempted, " +
+                "design_verdict_missing, design_not_satisfied, design_hash_unreadable, " +
+                "design_artifact_unreadable, design_verdict_stale) unless the task carries a " +
+                "satisfied, independent, hash-matching DESIGN-REVIEW verdict. Because the refusal is " +
+                "unconditional — it does not except a task that never had a design phase — this fires " +
+                "on the ordinary task too, and this tool has no bypass parameter for it either: drop " +
+                "to the shell form and pass the audited bypass — " +
+                "`qa-gate.sh approve <id> --no-design '<reason>' '<summary>'` — when the task genuinely " +
+                "has no design phase, or record a verdict first with `qa-gate.sh design-review-record`.\n\n" +
                 "Replaces shell: `bash .claude/scripts/qa-gate.sh approve <id> '<summary>'`",
             inputSchema: {
                 task_id: z.string().min(1).max(256),

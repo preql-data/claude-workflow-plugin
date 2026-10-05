@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "b942ada4d53a3c0700ddec900ed87ebfa773a9ddc0f464f33e24b2d169020015",
+  "risk_threshold": "high",
+  "stop_condition": "Report HIGH only for: a route by which the recovery selects a record it should not; an\nunsound premise in the append-only position argument; a regression of K3's refuse-on-\nambiguity; a legitimate value the writer guard now wrongly rejects; or any remaining\npermanent-deadlock path. MEDIUM/LOW otherwise. If there is no HIGH, say so plainly.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R12-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:1851",
+      "evidence": "The recovery assumes NR reflects insertion order, but the supported bd 1.2.2 path returns comments with `ORDER BY created_at ASC, id ASC` (internal/storage/issueops/comments.go:24-29). Imported comments preserve their supplied created_at (internal/storage/issueops/create.go:620-648), and this repository's mandatory reconciliation explicitly runs `bd import` (.claude/scripts/beads-ledger.sh:597). Therefore a malformed comment imported after a well-formed winner can carry an older created_at, appear before that winner in `$firstlines`, and satisfy `maxbadpos < winpos`.",
+      "description": "The append-only position premise is unsound: storage insertion order is discarded in favor of a preserved, backfillable timestamp. A later-imported malformed record may represent a newer round that should force refusal, yet the selector treats it as safely historical and selects the existing winner. This is a concrete route by which recovery selects a record it should not."
+    }
+  ],
+  "iterations": 12,
+  "stopped_by": "stop_condition"
+}

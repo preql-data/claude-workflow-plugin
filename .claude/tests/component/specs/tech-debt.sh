@@ -70,12 +70,52 @@ bash "$CT" set "$PARENT_TID"
 OUT=$(bash "$TD" add medium "src/quux.ts:11" "2h" "Refactor login flow" --bd-task)
 BD_ID=$(printf '%s' "$OUT" | jq -r '.bd_task_id // empty')
 assert_match "tech-debt: --bd-task creates a Beads task id" \
-    '^[a-z0-9-]+\.' "$BD_ID"
+    "$BD_ID_RE" "$BD_ID"
 
-# 8. The created task has --deps blocks:<parent>. We confirm by listing
-# the task's dependencies. (bd show emits text; we grep for the parent id.)
-DEPS=$(cd "$FIXTURE" && bd show "$BD_ID" 2>/dev/null || echo "")
+# 8. The created task is linked back to the active task with a `blocks` edge.
+#
+# STRENGTHENED (claude-workflow-plugin-fkm.1.1). This used to grep the plain
+# text of `bd show` for $PARENT_TID via assert_contains. Two problems: the
+# needle is unguarded, and `grep -qF -- ""` matches ANY input — so if
+# PARENT_TID ever came back empty the assertion passed while proving nothing.
+# It is now read from the STRUCTURED .dependencies array, with the parent id
+# pinned non-empty first, so neither an empty needle nor a text-format change
+# can fake it.
+#
+# What it guards: tech-debt.sh used to pass `bd create --deps blocks:<active>`.
+# bd 1.1.2 still accepts that flag and records the edge BACKWARDS (exit 0, the
+# BLOCKER ends up depending on the new task — bd-compat pin #4 asserts the
+# inversion directly),
+# so the link vanished while the JSON kept claiming "created with blocks
+# dependency on the active task". The script now issues an explicit
+# `bd dep add`, and this asserts the edge really lands.
+assert_match "tech-debt: precondition — the active parent id is a real id (guards the needle below)" \
+    "$BD_ID_RE" "$PARENT_TID"
+DEP_IDS=$(cd "$FIXTURE" && bd show "$BD_ID" --json 2>/dev/null \
+    | jq -r 'if type=="array" then .[0] else . end | (.dependencies // [])[] | .id' 2>/dev/null || echo "")
 assert_contains "tech-debt: bd task linked back to parent (blocks)" \
-    "$PARENT_TID" "$DEPS"
+    "$PARENT_TID" "$DEP_IDS"
+DEP_KIND=$(cd "$FIXTURE" && bd show "$BD_ID" --json 2>/dev/null \
+    | jq -r --arg p "$PARENT_TID" 'if type=="array" then .[0] else . end
+             | (.dependencies // [])[] | select(.id == $p) | .dependency_type' 2>/dev/null || echo "")
+assert_eq "tech-debt: ...and the edge is a 'blocks' edge, not some other kind" "blocks" "$DEP_KIND"
+assert_json_field "tech-debt: ...and the JSON says so only because it is true" \
+    "$OUT" '.observations' \
+    "Row appended; Beads task $BD_ID created with blocks dependency on the active task."
+
+# 8b. CONTROL — the assertion above must be able to FAIL. With no active task
+# there is nothing to link to, so the same read must come back empty. Without
+# this, a bd whose `dependencies` array always echoed something would satisfy 8
+# forever.
+bash "$CT" clear >/dev/null 2>&1 || true
+OUT_NODEP=$(bash "$TD" add low "src/nodep.ts:1" "1h" "No active task" --bd-task)
+BD_ID_NODEP=$(printf '%s' "$OUT_NODEP" | jq -r '.bd_task_id // empty')
+assert_match "tech-debt 8b: CONTROL task created" "$BD_ID_RE" "$BD_ID_NODEP"
+DEP_IDS_NODEP=$(cd "$FIXTURE" && bd show "$BD_ID_NODEP" --json 2>/dev/null \
+    | jq -r 'if type=="array" then .[0] else . end | (.dependencies // [])[] | .id' 2>/dev/null || echo "")
+assert_eq "tech-debt 8b: CONTROL — with no active task the new task has NO dependencies" \
+    "" "$DEP_IDS_NODEP"
+assert_contains "tech-debt 8b: ...and the JSON does NOT claim a dependency it did not record" \
+    "NO blocks dependency was recorded" "$OUT_NODEP"
 
 [ "$FAIL" -eq 0 ]

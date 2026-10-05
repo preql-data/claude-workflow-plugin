@@ -1,0 +1,41 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-6im2",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "f8487049953265131c13371864de5b76c64af34dcf42db0f63acf91454540db6",
+  "reviewed_hash_basis": "canonical change-set path-list hash (impact-report.sh --hash-only) over the 24-path reconciled tracker shared with sibling task claude-workflow-plugin-xsu1 (one working tree, one change set); this task s own slice within it is orchestrator.md, SKILL.md, design-unit-bind-parity.test.sh and the run-tests.sh reconciliation.",
+  "risk_threshold": "high",
+  "stop_condition": "the design-unit-bind invocation is present and flag-correct in both prompt carriers; the parity census is non-vacuous per carrier and per flag with mutation-backed proof; every finding of the prior independent round (sol-codex r1, do-not-ship) adjudicated against the tree with evidence; no nested-spawn instruction introduced",
+  "verdict": "approve",
+  "findings": [],
+  "iterations": 2,
+  "stopped_by": "verdict",
+  "scope_files": [
+    ".claude/agents/orchestrator.md",
+    ".claude/skills/workflow-engine/SKILL.md",
+    ".claude/scripts/tests/design-unit-bind-parity.test.sh",
+    ".claude/scripts/tests/run-tests.sh"
+  ],
+  "s6_fix_assessment": [
+    {
+      "id": "S6-F1",
+      "status": "fixed",
+      "basis": "META-B now runs four carrier x flag cells with seven checks each (pre-mutation presence, byte mutation with cmp rc=2 refusal mapping, landing, invocation survival, sibling survival, carrier-specific census failure, restore control); executed live this session: 55/55 rc 0. The vacuous single-needle census the finding named is gone; the flag drop mutant is per-flag and the census is required to name exactly the mutated carrier."
+    },
+    {
+      "id": "S6-F2",
+      "status": "fixed",
+      "basis": "the claim is corrected, not the probe rerouted: the spec header and run-tests.sh:328-335 now say application-state read-only and explicitly NOT file-creation-free, disclosing the usage() heredoc temp file. The former side-effect-free wording is absent from both carriers of the claim (r9 R8-F5 basis independently confirms run-tests.sh)."
+    },
+    {
+      "id": "S6-F3",
+      "status": "fixed",
+      "basis": "parse_required_flags (spec :268) derives the flag set from the live shipped .usage value, refuses on unclassifiable tokens (exit 7 self-test at :325) and on an empty parsed set (:366-368 refuse with an explicit reason naming the vacuity risk); sections 3 and META-B iterate REQUIRED_FLAGS (:404, :469), never a hardcoded list; the two known flags remain as containment assertions so a future required flag joins the census automatically. The R8-F4 pipefail residue in the parser pipeline is fixed in an explicit scoped subshell with its own self-test."
+    }
+  ],
+  "prior_round_adjudication": "sol-codex r1 (docs/reviews/claude-workflow-plugin-6im2-r1.json, verdict findings, ship_recommendation do-not-ship) is adjudicated fully fixed by the fix rounds that followed: r8 sixim2_fix_assessment records S6-F1 fixed and S6-F2/F3 partially fixed with the residues renamed R8-F5/R8-F4, and r9 records both of those fixed with line evidence; this reviewer re-verified all three in the tree and by live execution. r1 itself fails review-check.sh validate-artifact (finding_id_malformed: S6-* ids vs the R<n>-F<n> grammar) and therefore cannot enter the REVIEW-ARTIFACT record grammar; it remains on disk in the change set and its findings are carried by this artifact instead. Its sandboxed spec_run (12/19) is documented inside r1 itself as a sandbox artifact, not a real failure; the authoritative live result this session is 55/55 rc 0.",
+  "verification_run": "live this session: design-unit-bind-parity.test.sh 55/55 rc 0; grep census of both carriers confirms the exact invocation with --design-task and --unit-id in orchestrator.md section 2b (fenced block) and SKILL.md; orchestrator.md cross-references verified (4c parenthetical no longer says not yet built, 5e Step D binds before delegation, self-check checklist carries the binding bullet); the section 2b text explicitly names the enforcement gap (advisory until design-conform is wired into approve) rather than claiming closure, matching the task description s DO NOT FIX WITH PROSE ALONE requirement as far as a prompt-plus-parity-test slice can; EXPECTED_SPECS=51 matches 51 discovered specs; run-tests.sh 48-to-51 reconciliation comments verified in the diff.",
+  "notes": "The bound-advisory residual is honest and named in both carriers: nothing enforces the binding until design-conform is wired into approve (deliberately deferred, qa-gate.sh DESIGN-CONFORM header records the deferral), and the parity spec is the mechanical backstop for the carriers, not for live use. The live-use gap the task predicted remains real: no DESIGN-UNIT v1 record exists in the store yet, so plan-batches unit-to-task resolution stays fixture-only until the first design-derived decomposition runs."
+}

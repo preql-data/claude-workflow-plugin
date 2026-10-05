@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-icn4",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "22e61881a5cbeb3ec82d4d8063eb1902a64416124953828b01945fb46c4e7bf9",
+  "risk_threshold": "high",
+  "stop_condition": "All three R1 findings are verifiably resolved on the current change set: the run.sh refusal guard carries a shipped four-leg pairing whose mutant reproduces the historical silent-full-run swallow and whose restore leg drives the real shipped file; the corrected execution-leg comment claims only what verify-before-stop.sh actually does before its circuit breaker; and no finding at or above high remains in the change set.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "low",
+      "location": ".claude/tests/component/run.sh:169-174",
+      "evidence": "The trailing-junk refusal arm (`[ \"$#\" -gt 2 ]` inside the --filter case arm) is the single refusal branch with no shipped assertion. Branch-identity analysis of the five refusal shapes against both old and new code: a bare positional and `--filter=pattern` both land in the `*` arm (and both fell through to the identical FILTER=\"\" full-run swallow under the historical one-liner) — covered by 14b.1/14c.1; `--filter` with no pattern and `--filter ''` both land on the same `-z \"${2:-}\"` test (a colon-dash default cannot distinguish absent from empty, both sides of history) — covered by 14b.3/14c.4. Trailing junk is the one shape with a genuinely new arm AND a different historical misbehaviour: the old guard ran a FILTERED run ignoring the junk (never the full-run swallow that cost two tier runs), so a mutant derived from the historical one-liner cannot reproduce a same-class misbehaviour for it. Verified refusing correctly by hand in round 1 (rc=2, names the extras); shellcheck clean; the region's existence is guarded by 14a.1's exactly-once sentinel count.",
+      "description": "Non-blocking coverage gap, one line to close in a future pass: a 14c-style execution assertion driving the shipped run.sh with `--filter <pattern> <junk>` and asserting rc=2 plus the 'unexpected extra argument(s)' message. No mutant needed — the historical analogue does not exist, so a plain refusal assertion is the honest shape. The specialist's stated scoping reason ('the other three are shapes the NEW case statement added dedicated arms for') is imprecise for `--filter ''` and `--filter=pattern` — those reduce by branch identity to the two covered shapes, which makes effective coverage 4 of 5 shapes, BETTER than the 2-of-5 framing — but exactly right for trailing junk, and the delivered boundary is correct in effect."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

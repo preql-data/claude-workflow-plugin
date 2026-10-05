@@ -67,7 +67,36 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # Tunables --------------------------------------------------------------------
+# CLI FLOOR. Deliberately still 0.47, matching install.ps1 (packaging-parity
+# pins both). It is checked first and only rejects a bd too old to talk to; it
+# does not admit one. Anything below RECOMMENDED_BD_VERSION is then REFUSED by
+# upgrade_beads_if_old, which prints the upgrade procedure (refuse_below_floor).
 MIN_BD_VERSION="0.47"
+# BEGIN RECOMMENDED_BD_VERSION (installer-beads-upgrade.sh extracts this block)
+RECOMMENDED_BD_VERSION="1.1.2"
+# END RECOMMENDED_BD_VERSION
+#
+# WHY A RECOMMENDED FLOOR EXISTS AT ALL (claude-workflow-plugin-fkm.1.1)
+# bd 0.47.x cannot re-import its own ledger once any single issue's JSONL line
+# exceeds Go's 64KB bufio.Scanner limit: `bd import` fails outright and a fresh
+# clone recovers ZERO issues. This repo hit exactly that — 15 oversized records,
+# 277 issues unrecoverable — and it is the reason for the 1.1.2 migration. A
+# target left on 0.47.x keeps that bug, and it is silent until the day someone
+# clones. So the installer offers to move them.
+#
+# The upgrade command is a SEAM, not a hardcoded curl: the component spec
+# substitutes a local fake so the path is testable without network access or a
+# real binary swap.
+# NO DEFAULT, deliberately (claude-workflow-plugin-wyt3). This was
+# `${BD_UPGRADE_COMMAND:-curl -fsSL .../beads/main/scripts/install.sh | bash}`
+# until 2026-10-02 — an UNPINNED fetch of whatever beads released most recently,
+# executed automatically, writing a bd binary over the one on the operator's
+# PATH and then migrating their store's schema one way. Empty by default means
+# the upgrade arm cannot fire unless an operator supplies a command they have
+# pinned and verified themselves AND sets CWP_BEADS_UPGRADE=1. The variable
+# remains a substitutable seam so the component spec can still exercise the
+# path (install.sh is the only caller; see upgrade_beads_if_old).
+BD_UPGRADE_COMMAND="${BD_UPGRADE_COMMAND:-}"
 # Both shipped MCP servers declare "engines": {"node": ">=18.17"} in their
 # package.json, and both launchers are dynamic-import shims that fail opaquely
 # on an older runtime. Kept in the same dotted-numeric shape MIN_BD_VERSION uses
@@ -96,6 +125,36 @@ SCRIPT_DIR=""
 if [ -n "${BASH_SOURCE[0]:-}" ]; then
     SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "")
 fi
+
+# BRIDGE_BD_VERSION — the version to tell a pre-1.1 operator to install. This is
+# a DIFFERENT QUESTION from RECOMMENDED_BD_VERSION, which is the floor we refuse
+# below; conflating them is how an instruction goes stale.
+#
+# PINNED, NOT DERIVED, and that is deliberate. An earlier version of this took
+# the LOWEST member of DOCTOR_BD_SCHEMA_VALIDATED, on the reasoning that the
+# bridge is the oldest validated version. That reasoning is wrong in a way that
+# fails silently: "can migrate a 0.47.x store" was MEASURED on specific
+# versions, it is not a property implied by set membership or by being lowest.
+# If the floor is ever raised past 1.1.2, a derivation would quietly start
+# printing a version that REFUSES users' workspaces — exactly the failure the
+# measurement below caught. So the value is pinned, and a spec assertion fails
+# if 1.1.2 ever leaves the validated set, which forces a re-measurement rather
+# than letting the instruction drift.
+#
+#   MEASURED 2026-10-02 in the Linux tier container, from a real bd 0.47.1 store
+#   holding 3 issues and 3 comments, flushed with `bd sync --flush-only`:
+#     bd 1.1.2  cannot open the 0.47.x store directly (rc=1), but `bd bootstrap`
+#               from the flushed ledger SUCCEEDS and recovers all 3 issues.
+#     bd 1.3.1  cannot open it either, and REFUSES to proceed at all:
+#               "historical SQLite workspace detected; explicit migration is
+#               required before this bd version can open or modify the
+#               workspace". `bd bootstrap` fails, 0 issues recovered.
+#   So the ceiling cannot bridge the SQLite era. Telling a 0.47.x operator to
+#   install the newest validated bd would strand their issues. They must land on
+#   the bridge version first and may move up afterwards.
+# BEGIN BRIDGE_BD_VERSION (installer-flags.test.sh extracts this block; keep the sentinels)
+BRIDGE_BD_VERSION="1.1.2"
+# END BRIDGE_BD_VERSION
 
 # plugin_json_version <file> — the TOP-LEVEL "version" string, or "" if the file
 # is missing or does not carry one at that depth. Deliberately jq-free (see
@@ -137,6 +196,7 @@ fi
 #   --upgrade         force the v2->v3 upgrade flow even if auto-detection is fuzzy
 #   --skip-mcp-deps   do not run `npm ci` for the MCP servers in the target
 #   --skip-verify     do not run workflow-doctor.sh after the install
+#   --skip-beads-upgrade  never run the opt-in bd upgrade; an old bd is still refused
 #   --verify          run ONLY the target's workflow-doctor.sh, then exit
 #   --help/-h         print usage and exit 0
 # Anything else is treated as the target project path (back-compat with v2
@@ -156,6 +216,7 @@ INSTALL_MODE_OVERRIDE=""
 VERIFY_ONLY=false
 SKIP_MCP_DEPS=false
 SKIP_VERIFY=false
+SKIP_BEADS_UPGRADE=false
 # Written as `if` blocks rather than `[ -n ... ] && VAR=true`: the AND-list form
 # is exempt from `set -e` at top level but NOT inside a function, so the short
 # spelling is a trap waiting for someone to move these three lines.
@@ -203,6 +264,13 @@ Flags:
                    then always exits 0 on success and nothing checks that the
                    target actually orchestrates.
                    Environment form: CWP_SKIP_VERIFY=1
+  --skip-beads-upgrade
+                   Never run the opt-in bd upgrade, even when
+                   BD_UPGRADE_COMMAND and CWP_BEADS_UPGRADE=1 are set. It does
+                   NOT admit an older bd: below the recommended version the
+                   installer still refuses, writes no plugin file, and prints
+                   the upgrade procedure.
+                   Environment form: CWP_SKIP_BEADS_UPGRADE=1
   --verify         Verify an EXISTING install and exit — install nothing. Runs
                    the TARGET's own .claude/scripts/workflow-doctor.sh and
                    exits with its status (0 healthy, 1 a check failed, 2 a
@@ -261,6 +329,10 @@ while [ $# -gt 0 ]; do
             ;;
         --skip-verify)
             SKIP_VERIFY=true
+            shift
+            ;;
+        --skip-beads-upgrade)
+            SKIP_BEADS_UPGRADE=true
             shift
             ;;
         --verify)
@@ -344,10 +416,10 @@ fi
 #
 # PLACED BEFORE THE PREREQUISITE BLOCK ON PURPOSE. `--verify` on a node-less
 # machine has to WORK — the doctor's own `deps` check is what should report the
-# missing runtime, in the doctor's own vocabulary, alongside the ten other
-# checks. Aborting here with "node not found - REQUIRED" would answer a
+# missing runtime, in the doctor's own vocabulary, alongside every other check
+# in the registry. Aborting here with "node not found - REQUIRED" would answer a
 # diagnostic request with an installer error and tell the operator nothing about
-# the other ten checks.
+# the rest of the install's health.
 #
 # It runs the TARGET's copy, not this checkout's: the question `--verify`
 # answers is "is the install over there healthy", and a doctor read from the
@@ -436,6 +508,365 @@ if [ -n "$BD_VERSION_NUM" ]; then
         exit 1
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# Beads upgrader (claude-workflow-plugin-fkm.1.1)
+#
+# Moves a target off bd 0.47.x, where `bd import` dies on any JSONL line over
+# Go's 64KB bufio.Scanner limit and a fresh clone therefore recovers ZERO
+# issues. That failure is invisible until someone clones, which is why this is
+# not left to a printed suggestion.
+#
+# THE ORDERING IS THE WHOLE DESIGN, and it was established by measurement, not
+# assumption:
+#
+#   bd 1.1.2 CANNOT READ a 0.47.x SQLite store at all. Pointed at a .beads/
+#   containing beads.db it reports "no beads database found" — the issue
+#   database looks deleted. The only thing that survives the version boundary
+#   is .beads/issues.jsonl, and `bd bootstrap` rebuilds the new embedded-Dolt
+#   store from it (verified: 4/4 issues recovered on a legacy fixture).
+#
+#   Therefore the ledger MUST be exported with the OLD bd BEFORE the binary is
+#   replaced. Any database-vs-ledger delta that is not written out first is
+#   unreachable afterwards. If that export fails, we do NOT upgrade — a
+#   half-migrated target with an unreadable store and a stale ledger is far
+#   worse than an old bd that still works.
+#
+# REFUSAL, NOT DEGRADATION. Every path through upgrade_beads_if_old that would
+# leave bd below RECOMMENDED_BD_VERSION ends in refuse_below_floor, which exits
+# 1 — the skip flags and every failed opt-in step included. The install
+# continues only when bd is already at or above that floor, or when an opt-in
+# upgrade verifiably reached it. MIN_BD_VERSION is a separate, lower check made
+# earlier, and is not what admits a bd here.
+# ledger_comment_count <jsonl> — total comment entries across every record.
+# The measure that matters for a migration: record COUNT is preserved by an
+# exporter that silently drops the audit trail, so counting records proves
+# nothing. Tolerant of blank/corrupt lines (`-R` + `fromjson?`), and prints 0
+# when jq is absent so the caller degrades to "cannot detect loss" rather than
+# crashing — jq is a hard prerequisite checked earlier, so that is belt-and-braces.
+ledger_comment_count() {
+    [ -f "$1" ] || { printf '0'; return 0; }
+    command -v jq >/dev/null 2>&1 || { printf '0'; return 0; }
+    jq -rR 'fromjson? | ((.comments // []) | length)' "$1" 2>/dev/null \
+        | awk '{n += $1} END { printf "%d", n + 0 }'
+}
+
+# installer_rerun_cmd [--verify]
+#
+# The command the below-floor procedure prints for re-running THIS installer
+# (step 3) and for its final check (step 4, with --verify). The procedure is
+# addressed to people on bd 0.47.x, and nearly all of them installed with the
+# README's curl one-liner, so they have NO local install.sh: the
+# `bash install.sh <project>` printed here until claude-workflow-plugin-s229
+# sent them to a file that does not exist, at step 3 of a one-way migration.
+# The end-to-end run that measured the procedure used a clone, so it could not
+# see that. The printed form now follows how THIS run was started:
+#   - from stdin (`curl ... | bash`): the curl one-liner. CLAUDE_WORKFLOW_REPO
+#     and CLAUDE_WORKFLOW_BRANCH are carried into it whenever they differ from
+#     the defaults, so a run started against a branch re-runs that branch, not
+#     main. Run from the project directory, it installs into it.
+#   - from a file in a plugin checkout: that file's ABSOLUTE path. Step 1
+#     has already cd'd into the project, where a relative install.sh does not
+#     exist either.
+# Every branch ends in printf, so this returns 0 under `set -e` inside $(...).
+installer_rerun_cmd() {
+    local extra="${1:-}"
+    if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/.claude/agents" ] && [ -f "$SCRIPT_DIR/.claude-plugin/plugin.json" ]; then
+        printf 'bash "%s/install.sh"%s <project>' "$SCRIPT_DIR" "${extra:+ $extra}"
+        return 0
+    fi
+    local env_prefix="" slug url
+    if [ "$REPO_URL" != "https://github.com/preql-data/claude-workflow-plugin.git" ]; then
+        env_prefix="CLAUDE_WORKFLOW_REPO=$(printf '%q' "$REPO_URL") "
+    fi
+    if [ "$REPO_BRANCH" != "main" ]; then
+        env_prefix="${env_prefix}CLAUDE_WORKFLOW_BRANCH=$(printf '%q' "$REPO_BRANCH") "
+    fi
+    slug=$(printf '%s' "$REPO_URL" | sed -n 's#^https://github\.com/\([^/]*/[^/]*\)$#\1#p')
+    slug="${slug%.git}"
+    if [ -n "$slug" ]; then
+        url="https://raw.githubusercontent.com/$slug/$REPO_BRANCH/install.sh"
+    else
+        url="<the URL of the install.sh you ran>"
+    fi
+    printf 'curl -fsSL %s | %sbash%s' "$url" "$env_prefix" "${extra:+ -s -- $extra}"
+}
+
+# installer_check_cmd <target>
+#
+# The --verify command for an EXISTING target, in installer_rerun_cmd's form:
+# from a checkout, that checkout's installer by absolute path with the target;
+# under `curl ... | bash`, a cd into the target and then the one-liner's
+# --verify. It is printed where a failed post-install check says how to
+# re-check, and on the 0.47.x procedure that is the end of step 3's expected
+# exit-3 run. The end-to-end curl measurement (claude-workflow-plugin-s229)
+# caught those lines still telling a curl user to run a local install.sh.
+installer_check_cmd() {
+    if [ -n "$SCRIPT_DIR" ] && [ -d "$SCRIPT_DIR/.claude/agents" ] && [ -f "$SCRIPT_DIR/.claude-plugin/plugin.json" ]; then
+        printf 'bash "%s/install.sh" --verify "%s"' "$SCRIPT_DIR" "$1"
+        return 0
+    fi
+    printf 'cd "%s" && %s' "$1" "$(installer_rerun_cmd --verify)"
+}
+
+# refuse_below_floor <bd-version-now> [opt-in]
+#
+# The one exit for "bd is below RECOMMENDED_BD_VERSION": print the measured
+# upgrade procedure and exit 1. Every below-floor path in upgrade_beads_if_old
+# calls this instead of returning, so no flag and no failed opt-in step can let
+# the install proceed on a bd v5 does not support — which would be warning
+# where the installer should refuse (the claude-workflow-plugin-q5l6 lesson).
+# It runs BEFORE any plugin file is written: the first writes are the backup
+# and copy steps far below, and only `mkdir -p "$TARGET"` precedes it, so an
+# existing v4.1 install is left untouched and still working. Both arms say no
+# PLUGIN file was written, not that nothing was: `mkdir -p "$TARGET"` has
+# already created a target directory that did not exist. With "opt-in", the
+# operator's own upgrade step ran first and may also have re-flushed
+# .beads/issues.jsonl with their current bd, so that arm says so.
+refuse_below_floor() {
+    local have="$1" via="${2:-}"
+    echo ""
+    echo -e "${RED}REFUSING to install:${NC} v5 requires bd >= $RECOMMENDED_BD_VERSION and you have $have."
+    if [ "$via" = "opt-in" ]; then
+        echo "  No plugin file has been written. Your existing install is untouched;"
+        echo "  the opt-in step above may have re-flushed .beads/issues.jsonl with your bd."
+    else
+        echo "  No plugin file has been written. Your existing install is untouched."
+    fi
+    if [ "$SKIP_BEADS_UPGRADE" = true ] || [ "${CWP_SKIP_BEADS_UPGRADE:-}" = "1" ]; then
+        echo "  (--skip-beads-upgrade / CWP_SKIP_BEADS_UPGRADE=1 only stops the opt-in"
+        echo "  upgrade from running. It does not admit a bd below $RECOMMENDED_BD_VERSION.)"
+    fi
+    echo ""
+    echo "  This is a STORAGE-ENGINE change, not just a version bump: 0.47.x"
+    echo "  keeps issues in SQLite, $RECOMMENDED_BD_VERSION+ uses embedded Dolt, and the"
+    echo "  migration is ONE WAY — an older bd cannot read the result. Do this"
+    echo "  in order:"
+    echo ""
+    echo "    1. Back up your issues FIRST — the migration is not reversible:"
+    echo "         cd <project>"
+    echo "         cp -R .beads .beads.backup-\$(date +%Y%m%d)"
+    echo "         bd sync --flush-only   # writes .beads/issues.jsonl, comments preserved"
+    echo ""
+    local bridge="${BRIDGE_BD_VERSION:-$RECOMMENDED_BD_VERSION}"
+    echo "    2. Install EXACTLY bd $bridge. Not 'the latest' — measured: a newer"
+    echo "       bd REFUSES a 0.47.x workspace outright (\"historical SQLite"
+    echo "       workspace detected\") and cannot recover your issues, so"
+    echo "       install-latest would strand them. You can move up afterwards."
+    echo "         https://github.com/steveyegge/beads/releases/tag/v$bridge"
+    echo "       Verify what you downloaded against that release's checksums.txt"
+    echo "       before installing it."
+    echo "       This version is pinned, not computed: it is the one measured to"
+    echo "       bridge the SQLite era. Do not substitute a newer one here."
+    echo ""
+    echo "    3. Recover the store with the new bd, then re-run this installer:"
+    echo "         cd <project> && bd bootstrap     # rebuilds from the ledger"
+    echo "         $(installer_rerun_cmd)"
+    echo ""
+    echo "       EXPECTED: that installer run EXITS 3 and its check reports a"
+    echo "       STALE LEDGER. Your install is fine — a cross-era rebuild always"
+    echo "       leaves the ledger and database out of step. Step 4 clears it."
+    echo ""
+    echo "    4. Reconcile the ledger. DRY RUN FIRST — without --apply it only"
+    echo "       reports, so you see the effect before anything is written:"
+    echo "         bash .claude/scripts/beads-ledger.sh reconcile"
+    echo "       It prints \"DRY RUN — nothing changed\" and, on a healthy"
+    echo "       migration, \"nothing would be discarded from either side\"."
+    echo "       Proceed ONLY if you see that:"
+    echo "         bash .claude/scripts/beads-ledger.sh reconcile --apply"
+    echo "       Then re-run the check:"
+    echo "         $(installer_rerun_cmd --verify)"
+    echo ""
+    echo "  MEASURED END TO END through the curl one-liner, from a directory with"
+    echo "  no clone of this repository (container, bd 0.47.1 -> $bridge, 3 issues"
+    echo "  + 3 comments): steps 1-3 end with the installer exiting 3 and the doctor"
+    echo "  FAILING on beads_ledger; step 4 reports \"3 -> 3 records; nothing was"
+    echo "  discarded\" and the doctor then exits 0 with every issue intact. The"
+    echo "  \"nothing was discarded\" line is the result on THAT fixture, which is"
+    echo "  why the dry run above is not optional — your ledger is not that one."
+    echo ""
+    echo "  (Automatic upgrade is opt-in and has no default: set BD_UPGRADE_COMMAND"
+    echo "  to a command you have pinned and verified, plus CWP_BEADS_UPGRADE=1.)"
+    exit 1
+}
+
+upgrade_beads_if_old() {
+    local current="$1" target_dir="$2"
+
+    [ -n "$current" ] || return 0
+    # Already at or beyond the recommendation? Nothing to do. This is decided
+    # BEFORE any flag is read: the skip flags govern only whether the OPT-IN
+    # upgrade may run, and can never admit a bd below the floor
+    # (claude-workflow-plugin-ishe R5-F1).
+    local oldest
+    oldest=$(printf '%s\n%s\n' "$current" "$RECOMMENDED_BD_VERSION" | sort -V | head -1)
+    if [ "$oldest" != "$current" ] || [ "$current" = "$RECOMMENDED_BD_VERSION" ]; then
+        return 0
+    fi
+
+    echo ""
+    echo -e "${YELLOW}Beads $current is older than the recommended $RECOMMENDED_BD_VERSION.${NC}"
+    echo "  On 0.47.x, 'bd import' fails on any issue whose JSONL line exceeds 64KB,"
+    echo "  so a fresh clone of this project can recover ZERO issues."
+
+    # REPORT, DO NOT ACT. An automatic path may not make a destructive
+    # decision, and upgrading bd is destructive in a way that cannot be undone:
+    # a newer binary MIGRATES the embedded-Dolt store's schema on first run,
+    # one way, with no confirmation and no downgrade.
+    #
+    # What this used to do, until 2026-10-02: run BD_UPGRADE_COMMAND
+    # automatically, whose default is an UNPINNED `curl -fsSL
+    # .../beads/main/scripts/install.sh | bash` — i.e. whatever beads released
+    # most recently, written over the bd on the operator's PATH. That is three
+    # separate problems in one line: it executes remote code the operator did
+    # not ask for, it installs an unverified version with no checksum, and the
+    # version it lands on is whatever happens to be newest that day. It is
+    # reachable with NO FLAGS by anyone on bd 0.47.x — precisely the population
+    # the message above addresses.
+    #
+    # MEASURED (claude-workflow-plugin-wyt3): this path installed bd 1.3.1,
+    # which was then outside DOCTOR_BD_SCHEMA_VALIDATED, so an operator who
+    # followed the install instructions would have FAILED the doctor's
+    # bd-schema check. 1.3.1:66 has since been validated with its own CI lane,
+    # but "whatever is newest that day" can be outside the set again tomorrow.
+    # It was found because a test exercising it replaced the host's own bd.
+    #
+    # NOT A REGRESSION FROM ANY RELEASE: v3.5.0, v4.0.0 and v4.1.0 contain no
+    # BD_UPGRADE_COMMAND at all (verified against the tags). It entered at
+    # fdfd6ce, after v4.1.0, so this restores the shipped behaviour rather than
+    # changing it. If an automatic upgrade is ever wanted back, it must be
+    # opt-in AND pinned to an exact validated version with a checksum, the way
+    # .github/workflows/test.yml pins bd — not a moving `main`.
+    if [ "$SKIP_BEADS_UPGRADE" = true ] || [ "${CWP_SKIP_BEADS_UPGRADE:-}" = "1" ] \
+        || [ -z "$BD_UPGRADE_COMMAND" ] || [ "${CWP_BEADS_UPGRADE:-}" != "1" ]; then
+        # REFUSE, DO NOT CONTINUE. Returning here would let the install proceed
+        # and write v5 over a working v4.1 into a bd configuration v5 does not
+        # support. The skip flags land here too: they stop the opt-in upgrade
+        # from running, and on a bd below the floor that leaves nothing to do
+        # but refuse.
+        refuse_below_floor "$current"
+    fi
+
+    echo "  CWP_BEADS_UPGRADE=1 and an explicit BD_UPGRADE_COMMAND are set; upgrading."
+
+    # Step 1 — SAFEGUARD. Write the ledger with the CURRENT bd while it can
+    # still read its own store, because bd 1.1.2 cannot read a 0.47.x SQLite
+    # store at all and this ledger is the ONLY thing that crosses the boundary.
+    #
+    # WHICH EXPORTER, NOT JUST WHICH ORDER (R2-F1). This used `bd export`, which
+    # is a silent audit-trail shredder on the very versions being upgraded:
+    # bd 0.47.1's `bd export` emits every ISSUE and DROPS EVERY COMMENT — 974 to
+    # 0 on this repo, and re-measured for this fix (3 comments in the DB, a
+    # ledger with no `comments` key at all, exit 0). Bootstrapping 1.1.2 from
+    # that file destroys every approval record, rubric verdict, IMPLEMENTER
+    # identity and REVIEW-ARTIFACT in the target — the entire QA audit trail —
+    # while looking like a faithful backup. LESSONS.md records this exact trap.
+    #
+    # `bd sync --flush-only` on 0.47.x DOES preserve comments (measured: 3/3),
+    # which is why a 0.47-era project's committed ledger has them at all. So the
+    # writer is a version chain, comment-preserving leg first:
+    #   0.47.x -> `bd sync --flush-only`   (comments survive)
+    #   1.1.x  -> `bd export -o`           (`bd sync` is gone; comments survive)
+    #
+    # And the chain is not TRUSTED, it is VERIFIED. The pre-existing ledger is
+    # kept as a backup and the freshly written one must not contain FEWER
+    # comments; a regression means the writer dropped data, so we restore the
+    # backup and refuse the upgrade rather than migrate a hollowed-out ledger.
+    # 0.47.1's `sync --flush-only` can also short-circuit and write nothing at
+    # all (the 366.5 hash-match bug), which this same check catches.
+    local beads_dir="$target_dir/.beads"
+    local ledger="$beads_dir/issues.jsonl"
+    if [ -d "$beads_dir" ]; then
+        local backup="" comments_before=0 comments_after=0
+        if [ -f "$ledger" ]; then
+            backup="$ledger.pre-upgrade.bak"
+            cp "$ledger" "$backup" 2>/dev/null || backup=""
+            comments_before=$(ledger_comment_count "$ledger")
+        fi
+        if ( cd "$target_dir" && bd sync --flush-only >/dev/null 2>&1 ) && [ -s "$ledger" ]; then
+            echo -e "${GREEN}OK${NC} ledger written with bd $current before upgrading (sync --flush-only, comment-preserving)"
+        elif ( cd "$target_dir" && bd export -o "$ledger" >/dev/null 2>&1 ); then
+            echo -e "${GREEN}OK${NC} ledger written with bd $current before upgrading (export -o)"
+        else
+            [ -n "$backup" ] && cp "$backup" "$ledger" 2>/dev/null || true
+            echo -e "${YELLOW}SKIPPED${NC} Beads upgrade: could not write the ledger with the current bd."
+            echo "  Refusing to upgrade — bd $RECOMMENDED_BD_VERSION cannot read a 0.47.x store, so"
+            echo "  upgrading now would strand the database behind an out-of-date"
+            echo "  .beads/issues.jsonl. Fix the export first, then rerun."
+            [ -n "$backup" ] && rm -f "$backup" 2>/dev/null || true
+            refuse_below_floor "$current" opt-in
+        fi
+        comments_after=$(ledger_comment_count "$ledger")
+        if [ "${comments_after:-0}" -lt "${comments_before:-0}" ] 2>/dev/null; then
+            [ -n "$backup" ] && cp "$backup" "$ledger" 2>/dev/null || true
+            [ -n "$backup" ] && rm -f "$backup" 2>/dev/null || true
+            echo -e "${RED}REFUSING${NC} the Beads upgrade: this bd's exporter DROPPED comments"
+            echo "  (${comments_before} in the existing ledger, ${comments_after} after re-writing it)."
+            echo "  Those comments are the QA audit trail — approval records, rubric"
+            echo "  verdicts, reviewer identity. Migrating from that file would destroy"
+            echo "  them permanently, so the ledger has been RESTORED and nothing changed."
+            echo "  Upgrade bd by hand, then run: cd $target_dir && bd bootstrap"
+            refuse_below_floor "$current" opt-in
+        fi
+        [ -n "$backup" ] && rm -f "$backup" 2>/dev/null || true
+    fi
+
+    # Step 2 — replace the binary. Routed through BD_UPGRADE_COMMAND so the
+    # component spec can substitute a local fake.
+    if ! sh -c "$BD_UPGRADE_COMMAND" >/dev/null 2>&1; then
+        echo -e "${YELLOW}NOTE${NC} the Beads upgrade command failed (offline?)."
+        echo "  Upgrade by hand: $BD_UPGRADE_COMMAND"
+        refuse_below_floor "$current" opt-in
+    fi
+
+    # Step 3 — confirm the swap actually happened before touching any database.
+    local after
+    after=$(bd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || echo "")
+    if [ -z "$after" ] || [ "$after" = "$current" ]; then
+        echo -e "${YELLOW}NOTE${NC} Beads still reports ${after:-unknown} after the upgrade command."
+        echo "  Not migrating the database. Upgrade by hand, then rerun this installer."
+        refuse_below_floor "${after:-$current}" opt-in
+    fi
+    # ...and that it reached the floor. A command that swaps in another bd
+    # still below RECOMMENDED_BD_VERSION has changed the binary but not made
+    # it supported, so it gets the same refusal as never upgrading at all.
+    local lowest
+    lowest=$(printf '%s\n%s\n' "$after" "$RECOMMENDED_BD_VERSION" | sort -V | head -1)
+    if [ "$lowest" = "$after" ] && [ "$after" != "$RECOMMENDED_BD_VERSION" ]; then
+        echo -e "${YELLOW}NOTE${NC} the upgrade command left bd at $after, still below $RECOMMENDED_BD_VERSION."
+        echo "  Not migrating the database."
+        refuse_below_floor "$after" opt-in
+    fi
+    echo -e "${GREEN}OK${NC} Beads upgraded: $current -> $after"
+
+    # Step 4 — ALREADY-INSTALLED PATH. If the new bd cannot see a store but a
+    # ledger exists, rebuild from it. `bd bootstrap` is documented as
+    # non-destructive setup for fresh clones and recovery, and is exactly the
+    # SQLite -> Dolt bridge here.
+    if [ -d "$beads_dir" ]; then
+        if ( cd "$target_dir" && bd list --json >/dev/null 2>&1 ); then
+            echo -e "${GREEN}OK${NC} the upgraded Beads reads the existing database"
+        elif [ -s "$beads_dir/issues.jsonl" ]; then
+            echo "  The upgraded Beads cannot read the old store; rebuilding from the ledger..."
+            if ( cd "$target_dir" && bd bootstrap >/dev/null 2>&1 ) \
+                && ( cd "$target_dir" && bd list --json >/dev/null 2>&1 ); then
+                echo -e "${GREEN}OK${NC} database rebuilt from .beads/issues.jsonl (bd bootstrap)"
+            else
+                echo -e "${YELLOW}WARN${NC} could not rebuild the database automatically."
+                echo "  Your issues are still in .beads/issues.jsonl. Recover with:"
+                echo "    cd $target_dir && bd bootstrap"
+            fi
+        else
+            echo -e "${YELLOW}WARN${NC} no readable database and no ledger to rebuild from at $beads_dir."
+        fi
+    fi
+}
+
+upgrade_beads_if_old "$BD_VERSION_NUM" "$TARGET"
+# Re-read the version: everything downstream (the summary line, the doctor's
+# deps check) should describe the bd that will actually be in use.
+BD_VERSION_RAW=$(bd --version 2>/dev/null | head -1 || echo "unknown")
+BD_VERSION_NUM=$(echo "$BD_VERSION_RAW" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
 
 # node + npm are HARD prerequisites (v4.1 / C0b) ------------------------------
 #
@@ -575,12 +1006,22 @@ fi
 # never be installed — the same class of silent failure, one layer down.
 # Cross-checked by .claude/scripts/tests/mcp-deps.test.sh, which asserts both
 # files are git-tracked at lockfileVersion 3 with zero install scripts.
+#
+# designer.md / design-reviewer.md (v5.0.0 / D0) are required for the same
+# reason the five above are: v5 makes design a MANDATORY phase with its own
+# review loop, so a target missing either agent cannot run the workflow it
+# advertises — the orchestrator's design relay would spawn an agent type the
+# SDK never loaded and fall through to general-purpose, silently. grader.md and
+# judge.md stay OUT of this list deliberately: both are optional-tier surfaces
+# whose absence degrades a feature rather than breaking the core loop.
 for required in \
     ".claude/agents/orchestrator.md" \
     ".claude/agents/qa.md" \
     ".claude/agents/backend.md" \
     ".claude/agents/frontend.md" \
     ".claude/agents/devops.md" \
+    ".claude/agents/designer.md" \
+    ".claude/agents/design-reviewer.md" \
     ".claude/scripts/session-start.sh" \
     ".claude/scripts/intent-router.sh" \
     ".claude/scripts/post-edit.sh" \
@@ -1882,12 +2323,25 @@ MCP_DEPS_RESERVE_NAME='.node_modules.cwp-reserve'
 mcp_sha256_of() {
     local f="$1" raw="" out=""
     [ -f "$f" ] || return 0
+    # `out="${out#\\}"` decodes the ESCAPED output line GNU coreutils and perl's
+    # Digest::SHA emit when the filename holds a backslash or a newline: the
+    # line is prefixed with ONE backslash, so field 1 reads `\<64 hex>` and the
+    # 64-char guard below rejects a CORRECT digest. See hash_file in
+    # .claude/scripts/workflow-manifest.sh for the format citation
+    # (claude-workflow-plugin-18fc). Here the refusal is fail-CLOSED and safe —
+    # an empty answer means "cannot prove it is current", so npm ci runs — but
+    # it degrades for any install target whose path carries either byte. The
+    # decode is a no-op on unescaped output: a hex digest cannot start with a
+    # backslash. openssl needs none; it prints the name raw and `${raw##* }`
+    # already takes the last field.
     if command -v sha256sum >/dev/null 2>&1; then
         raw=$(sha256sum "$f" 2>/dev/null) || raw=""
         out="${raw%% *}"
+        out="${out#\\}"  # SHA256-ESCAPE-DECODE
     elif command -v shasum >/dev/null 2>&1; then
         raw=$(shasum -a 256 "$f" 2>/dev/null) || raw=""
         out="${raw%% *}"
+        out="${out#\\}"  # SHA256-ESCAPE-DECODE
     elif command -v openssl >/dev/null 2>&1; then
         # openssl 1.x prints "SHA256(f)= <hex>", 3.x "SHA2-256(f)= <hex>";
         # the hash is the last field either way.
@@ -2895,7 +3349,7 @@ else
                 "$VERIFY_JSON" 2>/dev/null || true
             echo ""
             echo "After fixing, re-verify without reinstalling:"
-            echo "  bash install.sh --verify \"$TARGET\""
+            echo "  $(installer_check_cmd "$TARGET")"
             echo "Offline host? bd doctor reaches GitHub, so the beads check can time out"
             echo "on a healthy install; re-verify with:"
             echo "  bash \"$TARGET_DOCTOR\" --target \"$TARGET\" --skip beads"
@@ -3197,7 +3651,7 @@ if [ "$INSTALL_EXIT_STATUS" -ne 0 ]; then
         echo "  Every file was written; workflow-doctor.sh could not produce a report."
     fi
     echo "  Scroll up for each failing check and its fix, or re-run:"
-    echo "    bash install.sh --verify \"$TARGET\""
+    echo "    $(installer_check_cmd "$TARGET")"
     echo ""
 fi
 exit "$INSTALL_EXIT_STATUS"

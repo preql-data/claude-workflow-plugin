@@ -1,0 +1,64 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-v7sa",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "1d2794f0359139b885961c48e99673d5415dc180a07620484170de76d1ec828f",
+  "risk_threshold": "high",
+  "stop_condition": "Every item of the operator's narrow brief is settled with evidence I produced myself: spec_cap_for and its four call sites are correct and every non-exempt spec is proven byte-identical to 7517397; the raised cap is still a bound and 1500s is judged against a measurement, not an assumption; every figure in the new comment block traces to a record I read; section 20 meets all four legs of the pairing requirement and passes when run; and no surviving statement in the tree asserts a single uniform L1 cap. No finding at or above high remains.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/run-tests.sh:1394",
+      "evidence": "The block states 'the raised cap is still a bound: about 1.8x its slowest passing CI run'. 1500/826 = 1.816 is arithmetically right, but 826s is the centralus job (111392636190, run 37187557586) where the spec PASSED -- an environment the raise does not exist for. I measured the spec's own shape rather than assuming it: `bash .claude/scripts/tests/run-tests.sh --filter 'runner-completeness'` on this host, rc=0, 487 assertions, runner-reported 935s (/usr/bin/time real 936.43), while sampling the runner's own incremental capture (RUN_SCRATCH/spec-out.1) every 5s. Assertion #478 (the CI shape's full count) is reached at t=916s and assertion #361 (15.9, exactly where the CI kill landed) at t=790s, so #361 is 86.2% of the 478-assertion run and the tail is CHEAPER per assertion than the head. Transferring that measured shape to the three slow jobs, which reached #361/#359/#356 at 903/904/904s, gives a complete run of 1047-1093s there; +20s for section 20 (measured as 936-916) = 1067-1113s. The cruder per-assertion-rate extrapolation (903*478/361 through 904*478/356) brackets it from above at 1196-1214s. Either way the headroom the raise buys against the environment it exists for is 1.23x-1.40x, not 1.8x. Supporting per-spec slowdowns I recomputed from the five l1-unit logs for every spec of 20s or more: 1.13x-1.50x (min_slow/max_fast through max_slow/max_fast), e.g. design-gate-precheck-wiring 26/25 -> 38/39/39.",
+      "description": "The one ratio the block publishes is computed against the FASTEST of the five jobs rather than the slowest, which is precisely the denominator choice this file's own SPEC_TIMEOUT_S ledger 78 lines above (:1316) says has already gone wrong twice: 'HEADROOM IS 1.167x, NOT 3.7x (nor the 1.31x this comment stated one round ago ...) each reasoned from the worst case measured at the time ... and nothing flagged it when a later spec grew past that worst case -- twice now'. The SIZING survives the correction and I am not asking for a different multiplier: 1.23-1.40x is above this file's own 800/900 = 1.125x split trigger and above the 1.167x it shipped deliberately, and the failure mode if the estimate is wrong is a clean TIMEOUT line on a pre-tag CI run, not a bad release. This is a reporting defect in the one sentence a future reader will quote. UNVERIFIED SUGGESTION -- verify before adoption: 'the raised cap is still a bound: about 1.8x its slowest passing CI run (826s), and about 1.2-1.4x the 1050-1215s a complete run is estimated to take on the three runners that killed it -- they reached 356-361 of its 478 assertions in 903-904s'."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/run-tests.sh:1388-1390",
+      "evidence": "The block says 'the A/B is recorded on claude-workflow-plugin-s229'. I read all 18 comments on s229. The A/B appears exactly twice: 2026-10-04T17:47:53Z, 'A fixed-hardware A/B of runner-completeness (45b59ff vs 7517397, clean clones, alternated) is running', and 2026-10-04T18:33:15Z referring to it as having shown runtime-neutrality. Neither carries 571/590/558/572. A grep of every s229 comment body for 571|590|558|572|565|580 returns only those two sentences plus one coincidental hex match inside the REVIEW-ARTIFACT hash line. The FIGURES are correct -- verified against the harness output at <scratchpad>/ab-rc.out: 'nproc: 2', A 45b59ff tree 2436e32 dirty=0 -> 558s and 572s, B 7517397 tree a0b7ea5 dirty=0 -> 571s and 590s, alternated A,B,A,B, 17:47:24Z-18:25:39Z -- and they ARE recorded, on claude-workflow-plugin-v7sa (comment 2026-10-04T22:11:20Z) and as means (565 vs 580) on claude-workflow-plugin-os0v.",
+      "description": "CONTRIBUTING.md's rule is that a number carries the command that produced it and the commit it was measured at. Here four numbers carry a citation that does not hold them: a reader following the pointer -- most plausibly whoever picks up os0v and wants to know whether the candidate was runtime-neutral -- finds the A/B ANNOUNCED on s229, not measured there. Nothing is wrong with the numbers and nothing is hidden; the pointer is one task off. UNVERIFIED SUGGESTION -- verify before adoption: '(a 2-vCPU container, clean clones, alternated; the A/B is recorded on this task, claude-workflow-plugin-v7sa, and was started under claude-workflow-plugin-s229)'."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/run-tests.sh:1401",
+      "evidence": "SPEC_TIMEOUT_S shapes that pass the existing validation (`''|*[!0-9]*` and `0`) but are not plain decimal integers now change this one spec's behaviour, because `$(( ))` reads a leading zero as octal and wraps at 2^63 while test(1) does neither. MEASURED through the shipped runner over a two-spec fixture (one named runner-completeness.test.sh, one not, both 2s bodies). NEW (4640075): SPEC_TIMEOUT_S=0900 -> 'run-tests.sh: line 1401: 0900: value too great for base', then 'line 2207: [: : integer expression expected', and '--- runner-completeness.test.sh: FAILED -- TIMEOUT at the s per-spec cap (1 assertion(s) emitted in 3s)' with the summary 'at their per-spec caps (0900s; runner-completeness.test.sh: s)'; rc=1. SPEC_TIMEOUT_S=09 identical. SPEC_TIMEOUT_S=1844674407370955162 -> cap wraps NEGATIVE and the spec is killed immediately: 'TIMEOUT at the -3074457345618258602s per-spec cap'; rc=1. SPEC_TIMEOUT_S=0010 -> spec_cap_for returns 13 (octal 8 * 5 / 3) while every other spec's watchdog compares against the string '0010', which test(1) reads as decimal 10. CONTROL, same fixture, same inputs, OLD runner (7517397): all three shapes rc=0, both specs PASSED. In every case the OTHER spec is unaffected, because the `*)` arm passes $SPEC_TIMEOUT_S through verbatim.",
+      "description": "A genuine, newly-introduced divergence at inputs the shipped validation accepts -- but LOW, not blocking, on four grounds. It fails CLOSED (a red tier with the arithmetic error printed on stderr), never green. It is confined to the one exempted spec. No shipped invocation path can reach it: CI's l1-unit sets no SPEC_TIMEOUT_S, the Makefile sets none, `make test-fast` (the Stop hook's command) sets none and does not include this spec, run-linux-tier.sh sets none, and runner-completeness's own fixtures pass `SPEC_TIMEOUT_S=3`. And hardening the validation is larger than 'the smallest version of B'. Recording it because it is the kind of edge that becomes someone's confusing hour, and because os0v will delete this arm anyway. UNVERIFIED SUGGESTION -- verify before adoption: if it is ever worth closing, the cheapest form is to strip leading zeros and bound the value where SPEC_TIMEOUT_S is validated (one `case` arm at :1366), not inside spec_cap_for."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "low",
+      "location": ".claude/scripts/tests/run-tests.sh:1316",
+      "evidence": "The ledger's headline still reads 'Per-spec wall-clock cap (seconds). HEADROOM IS 1.167x, NOT 3.7x ...' with no qualifier, and its 'Current worst observed, standalone' figure is unrecorded-review-artifact.test.sh at 756.16s/771.35s, measured 2026-09-13. The true current worst observed standalone is the spec this change exempts: 924s on this host (claude-workflow-plugin-os0v, ishe round 7) and 916s in my own run here for the same 478-assertion shape. The new block does say 'The headroom figures in the ledger above (measured 2026-09-13) do not include this spec' -- but that sentence is at :1391, 75 lines BELOW the headline a reader quotes. A prior review already filed this exact gap: docs/reviews/claude-workflow-plugin-gytz-r4.json's finding is located at \"runner-completeness.test.sh's own runtime against SPEC_TIMEOUT_S=900 -- a measurement this repo's ledger convention asks for and which no file currently records\".",
+      "description": "I judge the CHOICE (one sentence naming the gap, rather than refreshing the ledger) correct for an operator-scoped stopgap -- re-measuring the tier's worst case is a separate obligation and os0v deletes the exception anyway -- so this is NOT a request to refresh. It is a request to put the qualifier where the number is: a reader who stops at :1316 now gets a tier-level headroom claim that is wrong by more than the exception, and the pointer that would correct them is 75 lines away. UNVERIFIED SUGGESTION -- verify before adoption: append to :1316, 'HEADROOM IS 1.167x for every spec but one -- see spec_cap_for below for runner-completeness.test.sh, which this figure has never included'."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "low",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:4722",
+      "evidence": "Of the four call sites the change touches, three are asserted at the RAISED cap and one is not. 20.4 asserts the per-spec printf line ('--- runner-completeness.test.sh: FAILED -- TIMEOUT at the 5s per-spec cap'), 20.5 the summary line, 20.1/20.2 the watchdog bound in both directions. The FAILED_FILES entry (:2571, which reaches the operator as the 'Failed specs:' list: 'runner-completeness.test.sh (TIMEOUT: killed by the 5s per-spec cap after emitting N assertion(s))') is asserted at the 3s cap elsewhere in the file (5.3; 7.7 is the L2 runner's own equivalent, a different file) but nowhere at the raised one. Confirmed: `grep -c 'killed by the 5s' .claude/scripts/tests/runner-completeness.test.sh` returns 0, against 2 hits for 'killed by the 3s per-spec cap' (:476 in section 5, :712 in section 7).",
+      "description": "A completeness note, not a defect: the two sites sit in the same `if [ -f \"$TIMEOUT_MARKER\" ]` branch and interpolate the same $SPEC_CAP, so one cannot regress without the other, and 20.8's mutant collapses both together. Worth one assert_contains if section 20 is ever touched again. UNVERIFIED SUGGESTION -- verify before adoption: add after 20.5, assert_contains \"20.5b ...and the Failed-specs list names the same cap\" \"runner-completeness.test.sh (TIMEOUT: killed by the 5s per-spec cap\" \"$CAP_OUT\"."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "low",
+      "location": ".claude/scripts/tests/run-tests.sh:2745",
+      "evidence": "When the ONLY timed-out spec is the exempted one, the summary reads 'Timed out (counted in Failed): 1 spec(s) at their per-spec caps (3s; runner-completeness.test.sh: 5s)' -- asserted verbatim at 20.5 and reproduced in my own run of section 20. The leading '3s' is $SPEC_TIMEOUT_S, which in that scenario is the cap of NO spec that timed out. I also saw the degenerate form in the R1-F3 probe: 'at their per-spec caps (0900s; runner-completeness.test.sh: s)'.",
+      "description": "Deliberate and tested, and defensible as 'the tier cap, then the exceptions' -- but a count of 1 followed by a parenthetical listing two caps invites the reading 'one spec at 3s and also runner-completeness at 5s', i.e. two specs. Strictly below the bar for a change whose whole point is to be small. UNVERIFIED SUGGESTION -- verify before adoption: name the default as a default, e.g. '%d spec(s) at their per-spec caps (default %ss; %s)'."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "info",
+      "location": "CHANGELOG.md:2179 and .claude/tests/README.md:157",
+      "evidence": "Both inserted clauses leave the paragraph reflowed mid-sentence: CHANGELOG:2178-2180 now reads 'reporting it FAILED with a distinct TIMEOUT / reason -- never passed, never / skipped', and README:155-157 'see `spec_cap_for` in / `run-tests.sh`), or **returned while background / work from its own process group was still alive**'. Both render identically and neither is wrong.",
+      "description": "Cosmetic only. Noted so a later editor re-wraps rather than assuming the short lines are meaningful."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "stop_condition"
+}

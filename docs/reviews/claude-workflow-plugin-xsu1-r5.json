@@ -1,0 +1,60 @@
+{
+  "contract_version": 1,
+  "task_id": "claude-workflow-plugin-xsu1",
+  "scope_label": "D4b half 1 - epic-gate.sh plan-batches, round 5",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "cb38d3313d1e35566ab159e0f79f6182531e40f0c06a7aa0c8e0390b662fac16",
+  "reviewed_hash_basis": "sha256 over epic-gate.sh + plan-batches.test.sh + docs/HOOKS.md concatenated in that order; reproduced by the reviewer (hash_reproduced=yes) and independently by the orchestrator",
+  "risk_threshold": "high",
+  "stop_condition": "each round-4 fix re-verified as new code; the rewritten degradation path reviewed as new code because it is the safety net; every extraction on the plan path audited for rc-AND-shape discipline; four-part pairing applied to every META leg",
+  "verdict": "findings",
+  "iterations": 5,
+  "stopped_by": "verdict",
+  "r4_fix_assessment": [
+    {"id": "R4-F1", "status": "fixed", "basis": "PLAN-BATCHES-ALIAS-CARDINALITY-GATE at :1489-1500 computes the declared pair count with guarded jq, rejects nonnumeric/empty, and compares all three alias-array lengths against it."},
+    {"id": "R4-F2", "status": "fixed", "basis": "The validate-design ladder at :1220 now tests both vout_rc and vshape_ok."},
+    {"id": "R4-F3", "status": "fixed", "basis": "Control-char computation checks rc and array shape; the sentinel rejects 0x00-0x1f/0x7f with declared_path_contains_control_chars at :1295-1323."},
+    {"id": "R4-F4", "status": "fixed", "basis": "Both remaining jq assignments in _pb_degrade use cmd || rc=$?; a nonzero schedule or extraction reaches _pb_finish with batches=[] and an observation annotation."},
+    {"id": "R4-F5", "status": "partially_fixed", "basis": "The explicit lexical fallback is deleted and topo-computation failure emits no schedule. BUT degradation occurring before bindings are published still treats an empty task-to-unit map as 'no edges' and emits lexical order, which can still invert a real dependency. See R5-F4."},
+    {"id": "R4-F6", "status": "fixed", "basis": "EG is globally $CANON/epic-gate.sh at plan-batches.test.sh:277 and assertion 0.1 pins that identity. Orchestrator-verified independently."},
+    {"id": "R4-F7", "status": "fixed", "basis": "Section 4A replaces the actual intersection predicate with select(true) and asserts conflicting units co-batch; 4B is separately and accurately scoped to failure handling."},
+    {"id": "R4-F8", "status": "fixed", "basis": "Section 9n builds three real children, publishes two valid bindings with a known dependency, leaves the third unbound to reach _pb_degrade, and independently targets both remaining jq sites."}
+  ],
+  "findings": [
+    {"id": "R5-F1", "severity": "high", "location": ".claude/scripts/epic-gate.sh:1172,1210-1227",
+     "description": "Status and validator shape gates check only field PRESENCE, then compare jq -r output textually to 'true'. So satisfied:\"true\" or ok:\"true\" (JSON strings) are accepted exactly like JSON booleans, letting a malformed validator supply usable unit data and obtain parallel_safe=true.",
+     "evidence": "Reviewer ran inline literal probes: both has(...) predicates return rc 0 for string-valued booleans, and jq -r renders those strings as 'true', satisfying the downstream shell comparison.",
+     "suggested_fix": "Require exact types in the gates: .satisfied|type==\"boolean\", .ok|type==\"boolean\", string for hashes/paths/error keys, array for unit_ids, object for unit_files/unit_deps."},
+    {"id": "R5-F2", "severity": "high", "location": ".claude/scripts/epic-gate.sh:1551-1578,1617",
+     "description": "Several plan-path jq encoders and aggregations remain unguarded under set -e. A targeted jq failure while building a problem/binding entry, bound_pairs_json or problems_json exits the script before _pb_degrade/_pb_finish, producing NO named serial degradation envelope at all.",
+     "evidence": "Unguarded jq substitutions inside problem_entries+=(\"$(jq ...)\"), bound_entries+=(\"$(jq ...)\"), bound_pairs_json=$(...), problems_json=$(...). Probe: bash -c 'set -e; a+=(\"$(false)\")' exits 1 without reaching the next command.",
+     "suggested_fix": "Guard every encoder/aggregation with an explicit rc variable routing failure to _pb_degrade set_computation_failed; do not hide jq inside array-assignment or printf arguments."},
+    {"id": "R5-F3", "severity": "high", "location": ".claude/scripts/epic-gate.sh:1424-1432,1524-1527",
+     "description": "Two not-yet-existing paths that are Unicode-normalisation-equivalent or non-ASCII-case-equivalent can co-batch even where they name the same eventual file. The code documents this residual; the release invariant and docs claim unconditional file-set non-intersection.",
+     "evidence": "Neither alias pass can detect these spellings when neither path exists. The only case check is ascii_downcase; the inode check is gated by -e. The batching predicate then compares original strings byte-for-byte and treats them as disjoint.",
+     "suggested_fix": "DECIDED BY OPERATOR: narrow the CLAIM to match the code rather than over-degrade. State exactly what holds (byte-identical, symlink, inode, ASCII case-equivalent are caught; normalisation-equivalent/non-ASCII-case-equivalent where NEITHER path exists are not). Rejected alternative: fail closed on all non-ASCII declared paths, which over-degrades every project with a non-ASCII filename and cannot be narrowed later under bash 3.2 without new machinery."},
+    {"id": "R5-F4", "severity": "high", "location": ".claude/scripts/epic-gate.sh:979-986,1254,1596",
+     "description": "An early degradation occurring AFTER dependencies are extracted but BEFORE child bindings are published can emit a dependent before its prerequisite. With _PB_DEGRADE_DEPS_JSON populated and _PB_DEGRADE_BINDINGS_JSON still [], _pb_degrade maps every child to null, derives every dependency list as empty, and emits LC_ALL=C-sorted child order. This is why R4-F5 is only partially fixed.",
+     "evidence": "Control-char, canonical-path, case-collision and alias degradations all fire after dependency publication at :1254 but before binding publication at :1596. In the topological jq, an absent task-to-unit mapping takes the `if $u == null then []` arm, so T-A-DEPENDENT precedes T-Z-PREREQ despite the artifact carrying the dependency and the binding records being available but unread.",
+     "suggested_fix": "Resolve and publish clean bindings before any post-validation guard can emit a degraded schedule, OR refuse with batches=[] whenever artifact dependencies exist but a complete task-to-unit mapping is unavailable."},
+    {"id": "R5-F5", "severity": "medium", "location": ".claude/scripts/epic-gate.sh:842-865",
+     "description": "_pb_finish treats any nonempty successful result from emit_plan_batches as valid. A malfunctioning jq exiting 0 with whitespace, [], null or malformed text bypasses the jq-independent fallback and is persisted and printed as the envelope.",
+     "evidence": "The only post-call test is [ -z \"$out\" ]; there is no JSON or envelope-shape validation. Section 9h injects only an exit-1 jq, so it cannot discriminate this successful-wrong-output shape.",
+     "suggested_fix": "Check emit rc AND validate the complete required envelope shape before persistence; route nonobject, unparsable or wrong-field/type output to the jq-independent fallback."},
+    {"id": "R5-F6", "severity": "medium", "location": ".claude/scripts/epic-gate.sh:1003-1010",
+     "description": "The rewritten degradation extraction accepts sched_batches=[] as a successfully computed schedule even when child count is positive; its only content check is nonempty shell text, so a successful-but-empty extraction gets no refusal annotation.",
+     "evidence": "Inline probe of the exact extraction filter against {\"ok\":true,\"batches\":[]} returned [] with rc 0; at :1009 [ -n \"$sched_batches\" ] is true so batches is assigned without checking cardinality against $#. Section 9n injects only nonzero failures.",
+     "suggested_fix": "Validate that the extracted array has exactly $# singleton batches containing each expected task exactly once and no extras; otherwise retain batches=[] and append the schedule-computation refusal annotation."}
+  ],
+  "vacuity_sweep": {
+    "legs_examined": 23,
+    "non_discriminating": [
+      {"leg": "9f.9 PLAN-BATCHES-TOPO-ORDER-GATE strip", "why": "Its named SPECIFIC MISBEHAVIOUR is now batches=[], which is the SAFE refusal required when ordering is unavailable. It no longer demonstrates a dependency-order violation; the separate shipped control is the only ordering assertion."},
+      {"leg": "9h present-but-malfunctioning jq", "why": "The injected jq only exits nonzero, so the leg still passes while _pb_finish lacks successful-wrong-shape validation; its broad 'malfunction' label does not cover rc-0 malformed output."},
+      {"leg": "9n extraction fault", "why": "The shim exercises only an rc-1 extraction; it does not discriminate the successful [] result accepted by [ -n \"$sched_batches\" ]."}
+    ]
+  },
+  "notes": "No specs executed (an L2 suite was running concurrently). Reviewer used shasum, bash -n, rg, nl/sed, literal-inline jq probes and short in-memory errexit probes. Sections 4 and 7 DO print a line-initial '  SKIP:' and increment SKIPPED_SECTIONS when python3 is absent, and the final summary exposes the count - the vacuity concern raised in round 4 is genuinely closed. The Unicode alias finding follows the implementation's own documented residual; no filesystem-writing reproduction was attempted in the read-only sandbox."
+}

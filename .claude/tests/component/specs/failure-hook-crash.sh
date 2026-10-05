@@ -111,7 +111,7 @@ assert_eq "failure-hook-crash: subagent-start stub exits non-zero" "2" "$RC"
 # verify-before-stop.sh spec.
 # --------------------------------------------------------------------------
 TID=$(cd "$FIXTURE" && bd create "Hook-crash failure-injection task" -t task -p 1 --json 2>/dev/null | jq -r '.id // empty')
-assert_match "failure-hook-crash: task created" '^[a-z0-9-]+\.' "$TID"
+assert_match "failure-hook-crash: task created" "$BD_ID_RE" "$TID"
 # llh.18: seed the change-set BEFORE enter/approve so the change-set-bound
 # approval record carries the SAME hash verify-before-stop will recompute
 # below. (Approval is now bound to the reviewed files: approving an empty

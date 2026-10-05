@@ -51,17 +51,20 @@ listing the directory.
   assertions, 113 of them META-TESTs; counts measured at
   `claude-workflow-plugin-20e`, not estimated). Two carry the v4.1 P0:
   `installer-target-functional.sh` asserts a RENDERED TARGET orchestrates
-  (fresh install -> full doctor 11/11, the air-gap `node_modules` recipe
-  executed, the degraded SessionStart paths, six doctor METAs and a JSONC
-  settings.json installer META); `installer-v3-upgrade.sh` covers the in-place
-  upgrade. `qa-gate-baseline` codifies the 0wk.2 fix.
+  (fresh install -> full doctor 12/13 (0 fail, 1 expected `model_parity` skip),
+  the air-gap `node_modules` recipe executed, the degraded SessionStart paths,
+  six doctor METAs and a JSONC settings.json installer META);
+  `installer-v3-upgrade.sh` covers the in-place upgrade. `qa-gate-baseline`
+  codifies the 0wk.2 fix.
 - `.claude/tests/e2e/` — L3 live e2e fixtures + golden cassettes
   (`node-react-auth`, `python-django-bug`, `go-cli-refactor`,
   `monorepo-frontend-only`, `multi-domain-signup`, `qa-block-recovery`).
 - `.claude/scripts/tests/` — L1 bash unit tests (29 specs, 1,648 assertions;
   measured at `claude-workflow-plugin-20e`).
-- `.github/workflows/test.yml` — GitHub Actions CI: lint + 6 test jobs
-  + L4 daily drift cron.
+- `.github/workflows/test.yml` — GitHub Actions CI: 6 jobs (`lint`,
+  `l1-unit`, `l2-component`, `l3-vitest-unit`, `manifest-validate`,
+  `l3-live`), the last `workflow_dispatch`-only (manual) so it shows
+  as skipped on ordinary PR/push runs.
 
 ## Install / uninstall
 
@@ -88,9 +91,10 @@ See `docs/` (which has its own index in `docs/plans/README.md`):
 
 - `tests/` -> symlink to `.claude/scripts/tests/`.
 - Run: `make test` (or `bash tests/run-tests.sh` directly).
-- Health check an install: `make doctor` (or `make doctor TARGET=<dir>`) — eleven
-  functional checks that EXECUTE the SessionStart hook, both MCP servers and both
-  gate hooks. Safe mid-session; see `.claude/scripts/workflow-doctor.sh --help`.
+- Health check an install: `make doctor` (or `make doctor TARGET=<dir>`) —
+  thirteen functional checks that EXECUTE the SessionStart hook, both MCP
+  servers, both gate hooks, the Beads ledger and per-role model pin
+  agreement. Safe mid-session; see `.claude/scripts/workflow-doctor.sh --help`.
 - Smoke install: `make install-test` — installs into a tempdir and runs the
   doctor against the result. **Expected to PASS.** It was expected-red through
   `claude-workflow-plugin-0fc` (C0a): a rendered target had no

@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-auic",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "a4ac91601c276ce93f58b220765b9c5600768d867b9ada166b21b141426c353c",
+  "risk_threshold": "high",
+  "stop_condition": "All six r2 findings verified fixed IN PLACE (not annotated beside); the newly filed yvpe defect independently re-derived rather than accepted; and no shipped surface left asserting a rule or remedy the change set removed or disproved.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R3-F1",
+      "severity": "high",
+      "location": "CHANGELOG.md:30 and CHANGELOG.md:1800",
+      "evidence": "The R2-F2 fix text at :28-31 now reads 'a distinct identity *string*, mechanically enforced at design-record, though on a stock install it resolves to the SAME MODEL as the designer UNLESS THE OPTIONAL CODEX LANE IS CONNECTED (see the identity-collapse entry below)'. The entry it cross-references, :2825-2838 in the SAME [5.0.0] release entry, says the opposite and is correct: 'Design review is Claude-lane only in this release, and the documented Codex clearance does not work... Installing Codex therefore makes things *report* better without being better... The only real clearance today is design_reviewer=<family>-class'. CHANGELOG.md:1800, also under ## [5.0.0] - 2026-09-29, independently repeats the broken remedy: 'the two clearances (install Codex, or give design_reviewer a distinct family-class) are documented in the .claude/model-roles header'. So one release entry now makes three statements on this question, two of them false.",
+      "description": "The fifth consecutive appearance of the pattern, and this time it is INSIDE the fix. The R2-F2 correction was written against the old understanding and the yvpe discovery landed elsewhere in the document; the headline was not revisited, and it now points the reader directly at the paragraph that refutes it. :30 is also the only place left in the release notes still telling operators that connecting Codex fixes design-review identity - the exact guidance you said you were removing. Note also that the edit left three em-dashes in one sentence, orphaning the 'reusing the grader machinery' clause; worth repairing in the same pass."
+    },
+    {
+      "id": "R3-F2",
+      "severity": "high",
+      "location": ".claude/model-roles:101-102, .claude/scripts/model-select.sh:1371 and :1377, .claude/agents/design-reviewer.md:41, docs/RELEASE_AUDIT.md:932-936",
+      "evidence": "The yvpe correction reached README.md:182-190 and CHANGELOG.md:2825-2838 and stopped there. Still shipping the disproved remedy: model-roles:101-102, the CANONICAL clearance list - 'Install Codex (see docs/CODEX_SETUP.md). design_reviewer_lane=auto then resolves to the Sol lane, the review identity is no longer Claude, and the collapse condition... is false' - now directly contradicted by README:186-188 in the same release. model-select.sh:1377 is RUNTIME OUTPUT the operator sees at SessionStart: 'Clear it by installing Codex (design_reviewer_lane=auto then resolves to the Sol lane)', with the same claim restated in the code comment at :1371. design-reviewer.md:41 cites 'the two clearances (install Codex, or pin design_reviewer to a distinct model family)' two lines below :39, which correctly states no script drives that lane. RELEASE_AUDIT.md:932-936 carries DP2's residual as 'the two clearances... are one-line fixes. *Flip:* either clearance, applied by the operator.'",
+      "description": "These are the surfaces that matter operationally, and one of them is executable. An operator who reads the SessionStart warning, installs Codex, and sees !id disappear has been actively guided into believing a real risk is cleared when only the flag is - measurably worse off than before, because the warning that would have told them is now gone. Routing this into yvpe is legitimate, but then yvpe must name these five surfaces and RELEASE_AUDIT must not ship certifying a flip that does not work."
+    },
+    {
+      "id": "R3-F3",
+      "severity": "high",
+      "location": "docs/RELEASE_AUDIT.md:808 (DP2 row)",
+      "evidence": "DP2's CLAIM includes 'a collapse is reported, NEVER SILENTLY ACCEPTED', and its caveat restates 'the mechanism is real and the collapse is never silent'. Measured live on this Codex-installed host: designer=claude-fable-5, design_reviewer=claude-fable-5 (identical), design_reviewer_lane=codex, identity_collapse=false, .claude/.qa-tracking/design-family-collapse ABSENT, no warning, no !id. The collapse is silently accepted, so the claim is false in exactly the configuration this host is in. DP2's stated verification method is 'Direct read of shipped agent frontmatter and the resolver's own documentation comment' and its evidence quotes .claude/model-roles verbatim - it verified the DOCUMENTATION, never model-select.sh:1374-1376, the condition that decides. The caveat also frames the residual as resolved once 'an operator acts on one of the two clearances', which is untrue of clearance 1.",
+      "description": "A release-certification row whose central claim is falsified by the defect the same change set just filed. It is also the precise failure the ledger convention ADOPTED IN THIS CHANGE SET exists to prevent - RELEASE_AUDIT:744-748, rule 1: 'Every row cites its mechanism's CODE LOCATION... A citation that does not point at an implementation cannot be checked against one.' DP2 cites a doc comment and passes while proving something adjacent, the same shape the convention was written for after DP5. It needs the prove-or-remove treatment DP5 received: narrow the claim to what ships. I am not deciding the verdict mechanics - correcting the caveat alone leaves the tally at 10/7/0/1/18, whereas a NOT-PROVEN would break the zero rule, and which of those is honest is a release decision that is yours."
+    },
+    {
+      "id": "R3-F4",
+      "severity": "low",
+      "location": ".claude/agents/backend.md:348, frontend.md:353, devops.md:274, .claude/rubrics/default.md:32",
+      "evidence": "All four corrected paragraphs still OPEN with the pre-1dbz definition - 'maps each declared acceptance-criterion id to the `tests_added` entries that cover it' - before the following sentence broadens it to 'a test you added in tests_added above, OR a PRE-EXISTING test'. A pre-existing test is by definition not a tests_added entry, so the definitional clause still states the removed rule. docs/AGENTS.md:1027 already carries the correct wording: 'Maps each of the bound unit's acceptance-criterion ids to the array of TEST REFERENCES that cover it'.",
+      "description": "LOW, not HIGH: the correction is immediate and unambiguous rather than absent, so no reader is left with the false rule. Recorded because the definitional clause is exactly where this class of error recurs, and the fix is to copy the wording AGENTS.md already got right."
+    }
+  ],
+  "iterations": 3,
+  "stopped_by": "verdict"
+}

@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-1vrs",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "07e5990d65c0d40e210f433ada9c0096e53122d20f94620fc7b67276c199dddb",
+  "risk_threshold": "medium",
+  "stop_condition": "All five operator-named focus items (lgq4 restore+disclosure, we57 drift-signal survival, qwny non-vacuous fixture, 4c6r non-vacuous oracle, F5 ledger arithmetic) are independently reproduced against the shipped artifacts rather than read, and no finding at or above medium remains in the twelve changed files.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/workflow-doctor.test.sh:82-89",
+      "evidence": "The file's META-TEST index entry for 8 still reads: 'META-TEST 8 (claude-workflow-plugin-j7kk, 39cy) bumping the SCHEMA half of DOCTOR_BD_SCHEMA_PIN ... against a freshly bd-init'd fixture whose real bd/schema pair matches the shipped pin (the control), flips beads from PASS to FAIL, proving the bd-version-vs-store-schema check is EXACT equality and not a floor'. Commit 730759d renamed that constant to DOCTOR_BD_SCHEMA_VALIDATED (workflow-doctor.sh:244) and replaced exact-single-pin with set membership. Measured: `grep -rn DOCTOR_BD_SCHEMA_PIN` over the tree (excluding .git and docs/reviews) returns 4 hits -- this line, two explicit 'renamed from' notes (workflow-doctor.sh:230, test.yml:203, the latter carrying its own dated CORRECTION addendum), and one dated read-only snapshot (docs/handover/v5.0.0-handover.md:194, measured at commit bff6cc4, correct by construction). So this line is the only live dangling reference. The SAME file's runtime section header at :1234 WAS updated correctly and now reads '(claude-workflow-plugin-j7kk, 39cy, we57, 0cr6)' and 'a VALIDATED SET, not a floor or a single pin' -- the file's index and its own section header now contradict each other. The entry also omits the 8a/8b split and the path-regression mutant, which together are the majority of the commit's 155 inserted lines.",
+      "description": "This is a MAINTAINED current-state index, not a historical log: its own entry 4 (:39-50) is a cautionary tale about a stale 'eleven' that 'survived three review rounds of hand sweeps', and META-TEST 10/11's entries describe current behaviour in detail. The governing standard is stated by this same change set in the specialist's own words at workflow-doctor.sh:241-243: 'a sentinel still naming the retired single-pin design while the variable inside is a set would be exactly the stale-prose defect this codebase's own culture exists to catch.' It was applied to the sentinel comment and missed 1150 lines earlier in the same file. The stale claim is semantic, not merely nominal: 'EXACT equality and not a floor' states the RETIRED design as current, when the whole argument of the new header is that a single exact pin was the wrong shape. FIX (comment-only, no logic change, no new mechanism): update the entry to name DOCTOR_BD_SCHEMA_VALIDATED, state membership-in-a-set rather than exact-equality-with-a-pin, add we57/0cr6 to the task attribution to match :1234, and mention the 8a/8b split and the path-regression mutant."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "low",
+      "location": ".github/workflows/test.yml:596-601",
+      "evidence": "The new l1-doctor-bd-max job runs `bash .claude/scripts/tests/workflow-doctor.test.sh` directly (not through run-tests.sh) and deliberately does not set STRICT_SECTIONS, so its verdict is the script's exit code alone. META-TEST 8a (:1297-1299) and 8b (:1367-1370) each degrade to a `printf '  note: ... SKIPPED'` and exit 0 when `bd init` does not produce the expected store. The job exists solely to exercise the 1.3.0:66 member of DOCTOR_BD_SCHEMA_VALIDATED, so a fixture-build failure under a future bd would leave it green having validated nothing. MITIGATION MEASURED, which is why this is low and not medium: those notes ARE marker-shaped under run-tests.sh's SECTION_SKIP_RE (:1386, `^[[:space:]]*[Nn][Oo][Tt][Ee]:`), so l1-unit's STRICT_SECTIONS=1 would turn the same skip red at the 1.1.2 floor; only a bd-1.3.0-SPECIFIC fixture failure is uncovered. CONFIRMED CURRENTLY NON-VACUOUS: CI run 36458045072, job 109049318853, bd 1.3.0 / dolt 2.3.5 -- 8a control, 8a mutant, 8b control and 8b-ii regression all PASS, 223 assertions.",
+      "description": "Not blocking, and the specialist's stated reason for omitting STRICT_SECTIONS is correct on its own terms (METATEST 4's mcp_bd leg genuinely skips without node, so setting it would redden the job for an unrelated reason). Suggested follow-up rather than a must-fix: have the CI step assert that META-TEST 8a's and 8b's control lines appear in the captured output, which is a positive assertion over existing output, not a new mechanism."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "low",
+      "location": ".claude/scripts/tests/model-roles.test.sh:3186-3190",
+      "evidence": "11.5 asserts \"differs\" against `$([ \"$ISO_HASH_UNPROT_BEFORE\" != \"$ISO_HASH_UNPROT_AFTER\" ] && echo differs || echo same)`. 11.6 asserts \"contaminated\" against `$([ \"$ISO_HASH_UNPROT_BEFORE\" != \"$ISO_HASH_UNPROT_AFTER\" ] && echo contaminated || echo clean)`. Identical two variables, identical operator, different labels only -- they cannot disagree, and no input exists that makes one pass while the other fails.",
+      "description": "The framing (11.5 = non-vacuity, 11.6 = specific misbehaviour) is the right pairing shape per .claude/tests/README.md, but it is satisfied here by relabelling one observation rather than by making a second one. Consequence is narrow and arithmetic: the claimed +4 delta (452 -> 456, which I reproduced exactly) contains one assertion that cannot independently fail, so the count overstates independent coverage by one. Either fold the two into one assertion, or give 11.6 a genuinely different observable -- e.g. assert the created task is actually readable back out of the unprotected store, which is a distinct fact about the same write."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "info",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh (12.47e) and commit a8e9827 message",
+      "evidence": "a8e9827's message states 'full-suite before and after both report 464 assertions; the only failure in either run is 12.47e, present byte-identically in both (confirmed unrelated to sections 12 or 15, and to this change)'. Reproduced in cwp-l1-repro:full (bd 1.1.2, dolt 2.3.5, -u 1000:1000, CI's pins) against clean checkouts: AT a8e9827 -> 'PASSED: 464 assertion(s)', zero FAIL lines, 12.47e PASSED. AT 730759d (pre-4c6r) -> 'Total: 464 assertion(s)', FAILED: 1, and the sole failure is '15.9 the installed dolt spawns its flusher against a fresh store with no local config' -- the OLD ps-polling oracle -- while 12.47e PASSED there too.",
+      "description": "Out of scope per the operator's brief and NOT a reason to block; recorded because it corrects the record in two directions. (1) 12.47e is nondeterministic, not a stable pre-existing failure, so 'byte-identical before and after' is weaker attribution evidence than it reads as. (2) The same A/B independently CORROBORATES 4c6r beyond what the commit claims: the retired ps-poll oracle actually failed in a CI-matched container in the enabled direction, and the replacement passed in the same container -- the fix is demonstrated by a reproduced red-to-green, not only by argument."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

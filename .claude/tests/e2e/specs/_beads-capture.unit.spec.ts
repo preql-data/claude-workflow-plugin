@@ -2,14 +2,24 @@
  * _beads-capture.unit.spec.ts — offline unit specs for the runFixture
  * beads-capture helpers. The L3 harness reads `.beads/issues.jsonl`
  * pre- and post-run to compute `beadsTasksCreated` /
- * `beadsLabelTransitions`. Two scenarios it must handle:
+ * `beadsLabelTransitions`. Why an explicit flush is required at all has
+ * changed with the bd version, and BOTH reasons are historical context for
+ * the specs below:
  *
- *   1. Daemon-route race: the bd daemon writes SQLite eagerly but
- *      flushes JSONL on its poll interval (default 5s). A read
- *      immediately after a daemon-route `bd create` returns stale
- *      data and the diff is empty.
- *   2. BD_NO_DAEMON path: writes SQLite + flushes JSONL synchronously,
- *      so the diff captures the task without external intervention.
+ *   1. bd 0.47.x, daemon-route race: the bd daemon wrote SQLite eagerly
+ *      but flushed JSONL on its poll interval (default 5s). A read
+ *      immediately after a daemon-route `bd create` returned stale data
+ *      and the diff was empty. `BD_NO_DAEMON=1` opted out of that path,
+ *      writing SQLite + JSONL synchronously.
+ *   2. bd 1.1.x (claude-workflow-plugin-fkm.1.1): there is no daemon at
+ *      all — the engine is in-process embedded Dolt — so the race is gone.
+ *      The flush is MORE load-bearing, not less: 1.1.x ships
+ *      `export.auto=false`, so `bd create` writes the database ONLY and
+ *      `.beads/issues.jsonl` is never produced as a side effect of any
+ *      write. Without the flush the post-snapshot reads nothing at all,
+ *      rather than reading something stale. `BD_NO_DAEMON=1` is inert here
+ *      but still passed, because it is the exact production invocation and
+ *      still means something on 0.47.x.
  *
  * Live trace (claude-workflow-plugin-l1r.7,
  * cassettes/replays/rubric-revision-loop-2026-06-11T21-45-00-465Z.jsonl)
@@ -19,16 +29,14 @@
  *
  * Regression contract these specs encode:
  *
- *   a) `flushFixtureBeads` against a sandbox where a task was created
- *      via the BD_NO_DAEMON path leaves `.beads/issues.jsonl` populated
- *      with the new task — `readBeadsIssues` + `diffBeadsIssues` MUST
- *      see it. (Direct write path; should never have been broken, but
- *      this pins the contract.)
+ *   a) `flushFixtureBeads` against a sandbox where a task was just
+ *      created leaves `.beads/issues.jsonl` populated with that task —
+ *      `readBeadsIssues` + `diffBeadsIssues` MUST see it.
  *
- *   b) Without a flush, when bd is invoked via the daemon path with no
- *      flush window, `readBeadsIssues` may miss the task. With a flush
- *      injected before the post-snapshot, the task appears. This is
- *      the race the harness fixes.
+ *   b) The flush is what makes the post-snapshot true. On 0.47.x that was
+ *      about closing a daemon race; on 1.1.x it is the only thing that
+ *      writes the ledger at all. Either way, injecting it before the
+ *      post-snapshot is what makes the task appear.
  *
  *   c) `flushFixtureBeads` is tolerant: missing `.beads/` is treated as
  *      a no-op (a fixture that hasn't run `bd init` yet — returns
@@ -78,17 +86,25 @@ function makeSandbox(prefix: string): string {
   spawnSync("git", ["config", "user.name", "test"], { cwd: dir });
 
   // Install the bd shim under .claude/bin/, mirroring the fixture
-  // pattern. The shim wraps the real bd with --no-daemon, so callers
-  // that PATH-resolve through it never hit the daemon path. We point
-  // it at the actual bd location so the test still exercises real bd
-  // (BD_AVAILABLE guards us against missing binaries).
+  // pattern so flushFixtureBeads exercises its shim-discovery branch.
+  // We point it at the actual bd location so the test still exercises
+  // real bd (BD_AVAILABLE guards us against missing binaries).
+  //
+  // The shim used to inject `--no-daemon`. bd 1.1.2 REMOVED that flag,
+  // and the failure is not a clean "unknown flag": cobra treats an
+  // unknown flag as value-taking, so `bd --no-daemon init --prefix u3`
+  // consumed `init` as the flag's value and died with
+  // `unknown command "u3"`. Every spawn through this shim failed, which
+  // is what took four specs in this file red. bd 1.1.x runs an
+  // in-process embedded Dolt engine, so there is no daemon to disable
+  // and the wrapper is now a pass-through.
   mkdirSync(path.join(dir, ".claude", "bin"), { recursive: true });
   // Find a real bd. PATH lookup so it works on dev + CI.
   const which = spawnSync("which", ["bd"], { encoding: "utf8" });
   const realBd = which.status === 0 ? which.stdout.trim() : "bd";
   writeFileSync(
     path.join(dir, ".claude", "bin", "bd"),
-    `#!/bin/bash\nexec "${realBd}" --no-daemon "$@"\n`,
+    `#!/bin/bash\nexec "${realBd}" "$@"\n`,
     { mode: 0o755 },
   );
   return dir;
@@ -389,7 +405,13 @@ describe.skipIf(!BD_AVAILABLE)("beadsCapture: real-bd flush contract", () => {
   // bd has written to SQLite — which is the contract the live race
   // violated by reading without flushing.
 
-  it("flush + diff captures a task created via BD_NO_DAEMON=1 (post-fix contract)", () => {
+  // RENAMED (fkm.1.1): the title used to read "...created via
+  // BD_NO_DAEMON=1", which credited the captured task to an env var that
+  // does nothing on bd 1.1.x — there is no daemon to opt out of. The env
+  // var is still PASSED below, because that is the exact production
+  // invocation in beadsCapture.ts and it remains meaningful on 0.47.x, but
+  // the contract being pinned is the flush+diff pipeline, not the variable.
+  it("flush + diff captures a newly created task (the capture contract)", () => {
     const dir = makeSandbox("flush-contract");
     try {
       // bd init via the shim — mirrors how a real fixture sets up.
@@ -437,10 +459,14 @@ describe.skipIf(!BD_AVAILABLE)("beadsCapture: real-bd flush contract", () => {
       // when bd has already auto-flushed.
       const flushResult = flushFixtureBeads(dir);
       expect(flushResult.bdMissing).toBe(false);
-      // We accept ok:true OR a non-zero exit so long as issues.jsonl
-      // exists with content — bd sync --flush-only sometimes exits 1
-      // when no flush is pending (the auto-flush already ran). Either
-      // way the contract is "issues.jsonl reflects the new task".
+      // TIGHTENED (fkm.1.1). This used to accept ok:true OR a non-zero exit
+      // "so long as issues.jsonl exists with content", because
+      // `bd sync --flush-only` could legitimately exit 1 when no flush was
+      // pending. The flush is now a single unconditional `bd export -o`,
+      // which has no pending-state to short-circuit on, so a non-zero exit
+      // is a real failure and is asserted as one. Loosening this back would
+      // hide exactly the "exit 0 but wrote nothing" shape that 366.5 was.
+      expect(flushResult.ok).toBe(true);
 
       const after = readBeadsIssues(dir);
       const { created } = diffBeadsIssues(before, after);
@@ -524,17 +550,30 @@ describe.skipIf(!BD_AVAILABLE)("beadsCapture: real-bd flush contract", () => {
   // reliable "ensure issues.jsonl reflects DB state" primitive when bd
   // judges another file as the canonical export.
   //
-  // This spec encodes the contract by reproducing the exact state:
-  // beads.db populated + sync_base.jsonl present with matching hash +
-  // issues.jsonl ABSENT. flushFixtureBeads must restore issues.jsonl
-  // from the DB so the post-snapshot read sees the task.
+  // WHAT THIS STILL PINS ON bd 1.1.2 (claude-workflow-plugin-fkm.1.1)
+  // The 0.47.1 MECHANISM above cannot occur any more: `bd sync` was
+  // removed outright, and flushFixtureBeads now issues one unconditional
+  // `bd export -o`, which rewrites from the DB with no hash or
+  // sibling-file logic to short-circuit on. So this is no longer a
+  // reproduction of a live trap.
   //
-  // Pre-fix: this fails — flushFixtureBeads exits 0 but issues.jsonl
-  // stays absent and readBeadsIssues returns an empty map.
-  // Post-fix: flushFixtureBeads falls back to `bd export --force` (or
-  // equivalent full-rewrite path) which always populates issues.jsonl
-  // from the DB regardless of file-hash / sibling-file state.
-  it("flush populates issues.jsonl when sync_base.jsonl is the bd-recognized export and issues.jsonl is absent (the live-fixture pattern)", () => {
+  // It is kept, and still earns its place, because the STATE it builds is
+  // exactly the one that made the old flush lie — DB populated, a sibling
+  // .jsonl present, `issues.jsonl` ABSENT — and the CONTRACT is unchanged:
+  // the flush must produce issues.jsonl from the DB regardless. That is a
+  // live regression risk, not a historical one: the pre-fkm.1.1
+  // flushFixtureBeads only fell back to a full export
+  // `if (!existsSync(issuesJsonl))`, and any future "skip the export when
+  // a ledger is already there" optimisation would reintroduce the same
+  // class of bug. This test fails the moment someone adds one.
+  //
+  // The SETUP had to change: on 0.47.x, `bd create` wrote issues.jsonl as
+  // a side effect, which is where the initial ledger came from. bd 1.1.2
+  // ships `export.auto=false`, so create writes the DB only and the ledger
+  // must be materialised explicitly. Verified directly — after `bd init`
+  // and a `bd create`, .beads/issues.jsonl does not exist until a
+  // `bd export` runs.
+  it("flush restores issues.jsonl from the DB when a sibling .jsonl exists and issues.jsonl is absent", () => {
     const dir = makeSandbox("flush-sync-base-hash-trap");
     try {
       const shim = path.join(dir, ".claude", "bin", "bd");
@@ -543,8 +582,8 @@ describe.skipIf(!BD_AVAILABLE)("beadsCapture: real-bd flush contract", () => {
         encoding: "utf8",
         timeout: 15_000,
       });
-      // Create a task via the no-daemon path. bd will populate both
-      // beads.db AND issues.jsonl on the create itself.
+      // Create a task. On bd 1.1.2 this populates the DB only — the
+      // ledger is materialised by the explicit export below.
       const create = spawnSync(
         shim,
         [
@@ -566,6 +605,17 @@ describe.skipIf(!BD_AVAILABLE)("beadsCapture: real-bd flush contract", () => {
       );
       expect(create.status).toBe(0);
       const initialJsonl = path.join(dir, ".beads", "issues.jsonl");
+      // Materialise the ledger explicitly. On 0.47.x the create above did
+      // this implicitly; 1.1.2 defaults export.auto=false, so a fixture's
+      // first ledger comes from an export. Asserted rather than assumed,
+      // because the whole test depends on this file existing before it is
+      // renamed away.
+      const seedExport = spawnSync(shim, ["export", "-o", initialJsonl], {
+        cwd: dir,
+        encoding: "utf8",
+        timeout: 15_000,
+      });
+      expect(seedExport.status).toBe(0);
       expect(existsSync(initialJsonl)).toBe(true);
 
       // Reproduce the live-fixture pristine state by simulating the
@@ -574,14 +624,17 @@ describe.skipIf(!BD_AVAILABLE)("beadsCapture: real-bd flush contract", () => {
       //       run's bd having promoted the export to a sync base, and
       //       leaving the gitignored sync_base.jsonl behind after the
       //       harness's `git clean -fd` removed only issues.jsonl).
-      //   (b) at this point the bd metadata's jsonl_content_hash still
-      //       matches sync_base.jsonl's content — exactly the condition
-      //       that triggers bd 0.47.1's "JSONL unchanged (hash match)"
-      //       short-circuit.
-      // We don't rely on calling `bd sync` to set up the trap because
-      // bd in 0.47.1 is finicky about sync without a configured branch;
-      // the rename + retained hash IS what the live trace's fixture
-      // state looks like (verified against the .beads/beads.db at
+      //   (b) ON bd 0.47.x ONLY, the metadata's jsonl_content_hash then
+      //       still matched sync_base.jsonl's content — the condition that
+      //       triggered the "JSONL unchanged (hash match)" short-circuit.
+      //       bd 1.1.2 keeps no such state and `bd export -o` consults
+      //       none, so on the bd this suite runs against, (b) is history:
+      //       what survives is the STATE in (a), which is the part the
+      //       contract below actually depends on.
+      // The trap was never set up by calling `bd sync` — 0.47.1 was finicky
+      // about sync without a configured branch, and `bd sync` no longer
+      // exists at all. The rename IS what the live trace's fixture state
+      // looked like (verified against the .beads/beads.db at
       // .claude/tests/e2e/fixtures/node-react-auth/.beads/).
       const syncBasePath = path.join(dir, ".beads", "sync_base.jsonl");
       writeFileSync(syncBasePath, readFileSync(initialJsonl, "utf8"));

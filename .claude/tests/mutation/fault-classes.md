@@ -228,7 +228,7 @@ therefore **never** synthesised by this harness:
 
 - mutating `rm`, `mv`, `cp` targets (path-traversal, accidental delete)
 - mutating `git push`, `git reset --hard`, `git checkout`, `git branch -D`
-- mutating `curl`, `wget`, `gh`, `bd sync` (network-touching)
+- mutating `curl`, `wget`, `gh`, `bd dolt push` (network-touching)
 - mutating anything that writes to `$HOME` outside the worktree
 
 The generator's pattern list explicitly skips any line whose first

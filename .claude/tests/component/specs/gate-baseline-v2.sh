@@ -38,6 +38,39 @@
 #      writer AND the Stop gate's git fallback both silently disabled
 #      themselves: the gate failed OPEN in exactly the topology the plugin
 #      tells agents to use. Now both ask `git rev-parse --git-dir`.
+#   7. THE TRACKER RECONCILE (94d) — the baseline's other half. The baseline
+#      says which git dirt is NOT this session's work; the reconcile says
+#      which of the rest the tracker is MISSING, because post-edit.sh only
+#      sees Write/Edit/MultiEdit/NotebookEdit and a file written by a Bash
+#      redirect never reached changed-files.txt — the file change_set_hash is
+#      computed over. Section 7 drives both writers against one tree and pins
+#      that the hash moves for the Bash-written file, that neither file is
+#      double-counted, and that baselined dirt still stays out.
+#   7M. META (spec-mandated) — strip every TRACKER-RECONCILE region from
+#      fixture copies of qa-gate.sh and verify-before-stop.sh; the
+#      Bash-written file must vanish from the tracker AND from the block
+#      reason's absolute-spelled file list. Restore-control re-asserts both.
+#   7.6/7.7 THE RESIDUAL AND ITS BOUNDARY (dpe / QA finding R4-F1) — the
+#      baseline is subtracted over raw porcelain LINES, so a second write to an
+#      already-baselined path is invisible to the reconcile, the hash and the
+#      reviewer, with no commit involved; a write to a path that was CLEAN at
+#      capture is folded in by the same call. Both directions, one tree.
+#   7R. META — one variable (the baseline-subtraction branch forced to its
+#      no-baseline arm) flips 7.6, proving the residual is that subtraction
+#      rather than an incidental filter.
+#   7S. THE DROP IS NO LONGER SILENT (claude-workflow-plugin-94d.1). 7.6 pins
+#      that a baselined path stays out of the tracker and the hash. That is the
+#      residual, and it is not fixed. What WAS fixed is that the reconcile used
+#      to report only what it ADDED, so a call that dropped 16 git-visible paths
+#      and a call that dropped none were indistinguishable — `ok:true`,
+#      `added=N`, nothing else. 7S pins the accounting (`subtracted=N`, the
+#      paths, the sidecar file), the rebuild-from-an-empty-tracker announcement,
+#      and the approve refusal (`change_set_reconstructed`) that the three
+#      together arm — with the two controls that separate "reconstructed" from
+#      "merely subtracted" (7S.4) and from "reconstructed but EMPTY" (7S.6).
+#   7SM. META — strip the SUBTRACTION-ACCOUNTING regions alone; the same call
+#      reverts to the pre-94d.1 silent success AND approve stops refusing.
+#      Restore-control re-asserts both.
 #
 # The v1 file (`approved-baseline`, a bare line list) is superseded by the v2
 # `gate-baseline`:
@@ -81,19 +114,28 @@ stop_reason() {
         | tail -1 | jq -r '.reason // empty' 2>/dev/null
 }
 
-# WHY THE ASSERTIONS BELOW MEASURE THE DECISION, NOT THE REASON TEXT
-# ------------------------------------------------------------------
-# On the git-status FALLBACK path the block reason does not enumerate paths —
-# it renders "Files changed: (check git status)", because the enumerated list
-# comes from changed-files.txt, which is empty by construction whenever the
-# fallback is what fired. Its `diff_summary` field is `git diff --stat HEAD`
-# over the WHOLE tree, so every pre-dirty file appears there whether the
-# baseline excluded it or not. Asserting "the reason does not mention
-# src/pre1.ts" would therefore be unfalsifiable-in-the-wrong-direction: it can
-# never pass, and a naive fix (assert it DOES appear) would pass with the
-# baseline mechanism entirely removed. The falsifiable observable is the
-# DECISION, so each case below pairs a block with the removal of its cause and
-# asserts the release comes back.
+# WHY SECTIONS 1-6 MEASURE THE DECISION, NOT THE REASON TEXT
+# ----------------------------------------------------------
+# The block reason's "Files changed:" list and its `changed_files[]` payload are
+# both enumerated from changed-files.txt, never from the git walk. Its
+# `diff_summary` field is `git diff --stat HEAD` over the WHOLE tree, so every
+# pre-dirty file appears there whether the baseline excluded it or not.
+# Asserting "the reason does not mention src/pre1.ts" would therefore be
+# unfalsifiable-in-the-wrong-direction: it can never pass, and a naive fix
+# (assert it DOES appear) would pass with the baseline mechanism entirely
+# removed. The falsifiable observable is the DECISION, so each case in sections
+# 1-6 pairs a block with the removal of its cause and asserts the release comes
+# back.
+#
+# Section 7 CAN assert on the reason text, and does, because 94d gave the two
+# surfaces different spellings: changed-files.txt holds ABSOLUTE paths (both its
+# writers emit them) while the git walk yields repo-relative ones. So
+# "$F7/src/b.ts" appearing in the reason proves the path reached the TRACKER —
+# the surface change_set_hash is computed over — and not merely the detector.
+# That distinction is the whole point of 94d, and it is what makes 7M's strip
+# leg falsifiable: with the reconcile stripped the detector still reports
+# src/b.ts (the union is not sentinel-wrapped), so only the absolute spelling
+# discriminates.
 
 # dirt_lines <root> — non-ignored porcelain entries, for preconditions that
 # need to say exactly what the tree is dirty with.
@@ -457,5 +499,1019 @@ else
     (cd "$F3" && git worktree remove --force "$WT") >/dev/null 2>&1 || true
 fi
 rm -rf "$WT_PARENT"
+
+# ===========================================================================
+# SECTION 7 — THE TRACKER RECONCILE (claude-workflow-plugin-94d).
+#
+# THE DEFECT. changed-files.txt has exactly one hook writing it: post-edit.sh,
+# on PostToolUse events that carry a path field. A file written by a Bash
+# redirect, `cp`, `sed -i` or a generator script therefore never entered it —
+# and that file is not just missing from a readout. `change_set_hash()` is a
+# sha256 of THIS LIST (impact-report.sh canonical_changed_files), so the gate
+# could name N paths and release on an approval binding M < N. Measured live
+# four times in two days; the tracker once held 37 of 71 changed files.
+#
+# THE FIX under test: `qa-gate.sh reconcile-tracker` folds the git-visible
+# remainder INTO the tracker (minus the gate baseline, minus the denylist,
+# spelled absolutely so the two writers cannot double-count one file), and
+# `enter`, `approve` and the Stop hook all call it before anything reads the
+# file.
+#
+# The three files are chosen to separate the three outcomes that must differ:
+#   A  written through post-edit.sh   -> was already tracked; must stay ONCE
+#   B  written with a plain `printf >`-> the defect; must now be tracked
+#   C  dirty BEFORE the baseline      -> must still be excluded (anti-overreach)
+# ===========================================================================
+mk_fixture
+F7="$COMPONENT_FIXTURE_PATH"
+bd_required_or_skip
+fast_stack_stub "$F7"
+TRACK7="$F7/.claude/.qa-tracking/changed-files.txt"
+BASE7="$F7/.claude/.qa-tracking/gate-baseline"
+QG7="$F7/.claude/scripts/qa-gate.sh"
+PE7="$F7/.claude/scripts/post-edit.sh"
+IR7="$F7/.claude/scripts/impact-report.sh"
+CT7="$F7/.claude/scripts/current-task.sh"
+
+mkdir -p "$F7/src"
+printf 'export const a = 0;\n' > "$F7/src/a.ts"
+printf 'export const c = 0;\n' > "$F7/src/c.ts"
+git_fixture_init "$F7"
+
+# C goes dirty BEFORE the baseline, so the baseline owns it.
+printf 'export const c = 1; // dirty on arrival\n' > "$F7/src/c.ts"
+: > "$TRACK7"
+bash "$CT7" clear
+rm -f "$BASE7"
+CLAUDE_PROJECT_DIR="$F7" bash "$QG7" baseline-capture --by test-harness >/dev/null 2>&1
+assert_contains "gbv2-7.0: precondition — the baseline owns src/c.ts" \
+    "src/c.ts" "$(baseline_body "$BASE7")"
+
+# A is edited THROUGH the hook, exactly as the runtime does it.
+printf 'export const a = 1;\n' > "$F7/src/a.ts"
+printf '{"tool_input":{"file_path":"%s/src/a.ts"}}' "$F7" \
+    | CLAUDE_PROJECT_DIR="$F7" bash "$PE7" >/dev/null
+assert_eq "gbv2-7.0: precondition — post-edit tracked A absolutely, once" "1" \
+    "$(grep -c -x -F "$F7/src/a.ts" "$TRACK7" | tr -d '[:space:]')"
+
+H_BEFORE=$(CLAUDE_PROJECT_DIR="$F7" bash "$IR7" --hash-only 2>/dev/null)
+
+# 7.1 THE DEFECT, pinned. B is written the way a Bash redirect writes it: no
+# tool call, so no PostToolUse, so no tracker entry — and the change-set hash
+# does not move. This assertion PASSES on both the broken and the fixed script;
+# it is here to name the mechanism 7.2 repairs, and 7.2 is what fails without
+# the fix.
+printf 'export const b = 1;\n' > "$F7/src/b.ts"
+assert_eq "gbv2-7.1: a Bash-written file does NOT reach the tracker on its own" "0" \
+    "$(grep -c -x -F "$F7/src/b.ts" "$TRACK7" | tr -d '[:space:]')"
+H_STILL=$(CLAUDE_PROJECT_DIR="$F7" bash "$IR7" --hash-only 2>/dev/null)
+assert_eq "gbv2-7.1: ...so the change-set hash is BLIND to it (the 94d defect)" \
+    "$H_BEFORE" "$H_STILL"
+assert_eq "gbv2-7.1: precondition — git DOES see it (so the repair has a source)" "1" \
+    "$(dirt_lines "$F7" | grep -c 'src/b\.ts' | tr -d '[:space:]')"
+
+# 7.2 THE REPAIR. One reconcile; B enters, A stays single, C stays out.
+RECON7=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+assert_json_field "gbv2-7.2: reconcile-tracker succeeded" "$RECON7" '.status' "reconciled"
+assert_eq "gbv2-7.2: B is now tracked, EXACTLY once, absolute-spelled" "1" \
+    "$(grep -c -x -F "$F7/src/b.ts" "$TRACK7" | tr -d '[:space:]')"
+assert_eq "gbv2-7.2: A is STILL tracked exactly once (no relative-spelling double count)" "1" \
+    "$(grep -c -x -F "$F7/src/a.ts" "$TRACK7" | tr -d '[:space:]')"
+assert_eq "gbv2-7.2: no relative spelling of A crept in alongside the absolute one" "0" \
+    "$(grep -c -x -F "src/a.ts" "$TRACK7" | tr -d '[:space:]')"
+assert_eq "gbv2-7.2: ANTI-OVERREACH — baselined src/c.ts did NOT enter the tracker" "0" \
+    "$(grep -c 'src/c\.ts' "$TRACK7" | tr -d '[:space:]')"
+assert_eq "gbv2-7.2: ...and src/c.ts is STILL dirty (it was excluded, not cleaned)" "1" \
+    "$(dirt_lines "$F7" | grep -c 'src/c\.ts' | tr -d '[:space:]')"
+assert_eq "gbv2-7.2: the tracker holds exactly the two session files" "2" \
+    "$(sort -u "$TRACK7" | grep -c . | tr -d '[:space:]')"
+
+# 7.3 THE CONSEQUENCE THAT MATTERS: the hash MOVED, so an approval recorded
+# against H_BEFORE can no longer release this tree. That is the fail-closed
+# direction and the reason 94d blocks the change-set binding work.
+H_AFTER=$(CLAUDE_PROJECT_DIR="$F7" bash "$IR7" --hash-only 2>/dev/null)
+assert_eq "gbv2-7.3: the change-set hash MOVED once B was reconciled in" "moved" \
+    "$([ "$H_AFTER" != "$H_BEFORE" ] && echo moved || echo unchanged)"
+assert_match "gbv2-7.3: ...to a real sha256, not a degraded sentinel" \
+    '^([0-9a-f]{64}|sha256-unavailable)$' "$H_AFTER"
+
+# 7.4 Idempotence: a second reconcile adds nothing and leaves the hash put.
+CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker >/dev/null 2>&1
+assert_eq "gbv2-7.4: a second reconcile adds nothing (unique count unchanged)" "2" \
+    "$(sort -u "$TRACK7" | grep -c . | tr -d '[:space:]')"
+assert_eq "gbv2-7.4: ...and the hash is stable across reconciles" \
+    "$H_AFTER" "$(CLAUDE_PROJECT_DIR="$F7" bash "$IR7" --hash-only 2>/dev/null)"
+
+# 7.5 The Stop hook names B. Its "Files changed:" list is enumerated from the
+# tracker, so the ABSOLUTE spelling appearing there is proof the path reached
+# the hash-bearing surface (see the header note above).
+TID7=$(cd "$F7" && bd create "94d reconcile: bash-written file must gate" -t task -p 1 -l devops,qa-pending --json 2>/dev/null | jq -r '.id // empty')
+bash "$QG7" enter "$TID7" >/dev/null 2>&1
+bash "$CT7" set "$TID7"
+REASON7=$(stop_reason "$F7")
+assert_eq "gbv2-7.5: the Stop still BLOCKS (unreviewed work)" "block" "$(stop_decision "$F7")"
+assert_contains "gbv2-7.5: the block reason names the Bash-written file, absolutely" \
+    "$F7/src/b.ts" "$REASON7"
+assert_contains "gbv2-7.5: ...alongside the hook-written one" \
+    "$F7/src/a.ts" "$REASON7"
+assert_not_contains "gbv2-7.5: ANTI-OVERREACH — the baselined file is not in the tracker list" \
+    "$F7/src/c.ts" "$REASON7"
+
+# ---------------------------------------------------------------------------
+# 7M. META (spec-mandated): strip every TRACKER-RECONCILE region from fixture
+# copies of the two scripts that carry the repair, and the Bash-written file
+# must disappear from BOTH the tracker and the block reason's absolute list.
+#
+# Both scripts, not one: with only verify-before-stop stripped, `enter` would
+# still reconcile; with only qa-gate stripped, the Stop hook's call would fail
+# and BLOCK on the fail-closed arm instead — a different outcome from the one
+# this META is about.
+#
+# The copies live in the fixture's .claude/scripts/ (replacing the symlinks) so
+# they keep resolving their sibling workflow-denylist.sh from their own
+# directory; a copy parked anywhere else takes a degraded path and stops being
+# a faithful mutant (same constraint as the post-edit.sh spec's META).
+# ---------------------------------------------------------------------------
+#
+# THE PATTERNS ARE ANCHORED (`^ *#`), for the reason QA finding R4-F5 gives for
+# the post-edit spec's SECOND-CHANCE strip: unanchored, they match the sentinel
+# name ANYWHERE on a line, so a future prose line quoting `TRACKER-RECONCILE
+# BEGIN` mid-sentence would start the excision early and delete real code above
+# the region. Both scripts already carry prose that names the region outside any
+# region (`qa-gate.sh`'s `reconcile_obs` note), which is exactly how such a line
+# arrives. Anchoring is behaviour-preserving today — every sentinel is a
+# `<indent># TRACKER-RECONCILE BEGIN|END (94d)` line and the stripped output is
+# byte-identical either way — and the assertions below could not tell the
+# difference on their own: a wild strip still removes lines and still leaves zero
+# `reconcile_tracker` references.
+strip_reconcile_regions() {
+    # strip_reconcile_regions <src> <dst>
+    awk '
+        /^ *# TRACKER-RECONCILE BEGIN/ { skip = 1; next }
+        /^ *# TRACKER-RECONCILE END/   { skip = 0; next }
+        !skip { print }
+    ' "$1" > "$2"
+}
+
+QG7_REAL=$(readlink "$QG7" || printf '%s' "$QG7")
+VBS7="$F7/.claude/scripts/verify-before-stop.sh"
+VBS7_REAL=$(readlink "$VBS7" || printf '%s' "$VBS7")
+META7_DIR="$F7/.claude/.qa-tracking/meta7"
+mkdir -p "$META7_DIR"
+strip_reconcile_regions "$QG7_REAL"  "$META7_DIR/qa-gate.stripped.sh"
+strip_reconcile_regions "$VBS7_REAL" "$META7_DIR/verify-before-stop.stripped.sh"
+
+# THE GUARD FIRST (QA finding R4-F4): a strip that matched nothing leaves the
+# copy byte-identical, and then the "with the reconcile stripped" legs below
+# measure the SHIPPED scripts while reporting on mutants — a green run that
+# proves nothing. The line-count legs that follow catch it for a strip; this
+# guard catches it for any mutation, including the substitutions §7R uses.
+assert_mutant_applied "gbv2-7M META (qa-gate strip)" "$QG7_REAL" "$META7_DIR/qa-gate.stripped.sh"
+assert_mutant_applied "gbv2-7M META (Stop hook strip)" "$VBS7_REAL" "$META7_DIR/verify-before-stop.stripped.sh"
+
+# Sanity: the strip actually removed something from each file, and each copy
+# still parses (it must fail for the reason under test, not for a syntax error).
+assert_eq "gbv2-7M META: the strip removed lines from qa-gate.sh (non-vacuous)" "smaller" \
+    "$([ "$(grep -c . "$META7_DIR/qa-gate.stripped.sh")" -lt "$(grep -c . "$QG7_REAL")" ] && echo smaller || echo same)"
+assert_eq "gbv2-7M META: the strip removed lines from verify-before-stop.sh (non-vacuous)" "smaller" \
+    "$([ "$(grep -c . "$META7_DIR/verify-before-stop.stripped.sh")" -lt "$(grep -c . "$VBS7_REAL")" ] && echo smaller || echo same)"
+# executable_refs <file> <needle> — lines mentioning <needle> that are NOT
+# comment-only. THE ANCHOR FOR THE TWO LEGS BELOW, re-cut from a bare text count
+# (claude-workflow-plugin-qbhw / P7).
+#
+# WHAT THESE LEGS ACTUALLY CLAIM, which is what their NAMES have always said: no
+# CALL survives the strip. That is the property that matters, because the strip
+# deletes the function's definition — a surviving call would make the stripped
+# copy a BROKEN script rather than a faithful pre-94d one, and every leg below
+# would then be measuring a syntax-or-runtime error instead of the behaviour
+# under test.
+#
+# WHY THE OLD ANCHOR DRIFTED. It was `grep -c 'reconcile_tracker'`, a count of
+# TEXT occurrences, standing in for a claim about CODE. Any comment outside the
+# sentinel regions that named the function tripped it, and such comments are
+# legitimate and expected: code near the reconcile has to explain its
+# relationship to it. P7 added exactly one — a header sentence noting that the
+# reconciler emits absolute paths — and this leg went red on a change that could
+# not affect the property it names. The file was already paying for the
+# imprecision: an existing comment contorts itself into prose ("spelled in prose
+# rather than with the function's own identifier deliberately") solely to avoid
+# this grep.
+#
+# WHY THE NEW ANCHOR CANNOT DRIFT THE SAME WAY. It asks a question about the
+# LINE'S KIND, not about the file's prose: a line that begins with optional
+# whitespace and then `#` cannot contain a call, in any shell, ever. Nothing a
+# future author writes in a comment can change that, so comments are structurally
+# outside the measurement rather than tolerated by an exception list. It stays
+# strict where it counts: a trailing comment on a CODE line (`foo  # ...`) is not
+# comment-only, so it is still counted — over-strict in that one direction, which
+# is the safe one.
+#
+# It is deliberately NOT a `#`-stripping pass. Stripping comments from shell
+# means deciding whether a `#` sits inside a string, a `${var#pat}` expansion, or
+# a `$#` — parsing shell with a regex, in a checker whose whole job is to be more
+# trustworthy than the thing it checks.
+#
+# THE SAME DRIFT HAS A SECOND DOOR: STRINGS (claude-workflow-plugin-i8cx). The
+# comment test classifies a LINE, and a line inside a multi-line double-quoted
+# string — an emit_block message — cannot be classified per line at all: it
+# carries no quote of its own and no `#`, so it reads as code. i8cx added
+# operator-facing prose to the Stop hook's undeterminable-change-set refusal
+# ("...the same rule the reconcile-tracker and denylist blocks apply") and this
+# leg went red on a MESSAGE — the exact P7 failure, one lexical level down.
+# String-stripping is rejected for the same reason comment-stripping was: a
+# multi-line quote state machine IS parsing shell with a regex.
+#
+# The honest sharpening is a better KIND question, available only for the
+# SUBCOMMAND spelling: `reconcile-tracker` is not executable by itself — an
+# invocation structurally requires the gate carrier on the same line
+# (`"$QA_GATE" reconcile-tracker` / `qa-gate.sh reconcile-tracker`), so that
+# leg anchors on the carrier+subcommand shape (META7_VBS_INVOKE_RE below). The
+# FUNCTION spelling (`reconcile_tracker`) keeps the bare-token anchor: for a
+# function, the bare word IS the invocation shape. Two residuals, stated: a
+# line QUOTING a full runnable recipe (`bash .../qa-gate.sh reconcile-tracker`
+# inside a message) still counts — over-strict, the safe direction, and today
+# every such recipe lives inside the reconcile sentinel anyway (measured: the
+# shipped hook's 4 non-comment carrier lines all strip away); and a dispatch
+# through a variable (cmd=reconcile-tracker; "$QA_GATE" "$cmd") is invisible —
+# the same residual the bare-token anchor always had.
+#
+# The THREE legs immediately after this pair prove the anchors are SENSITIVE
+# to a real call and INSENSITIVE to prose — comment prose AND string prose;
+# without them this would be a guard that was loosened and never seen to fire.
+# The third leg's call-line is EXTRACTED from the shipped hook rather than
+# re-typed, so if the shipped invocation spelling ever drifts off the pattern,
+# the extraction comes back empty and that leg fails LOUDLY instead of the
+# anchor rotting into match-nothing.
+executable_refs() {
+    # -E so a caller can pass the carrier+subcommand alternation; the bare
+    # function-name patterns are metacharacter-free and mean the same in ERE.
+    grep -E "$2" "$1" 2>/dev/null | grep -vc '^[[:space:]]*#' | tr -d '[:space:]'
+}
+
+# The invocation shape for the SUBCOMMAND spelling (see the header above):
+# the gate carrier and the subcommand on one line.
+# shellcheck disable=SC2016  # single quotes intentional: $QA_GATE is a
+# literal to find in the AUDITED file, not an expansion for this shell.
+META7_VBS_INVOKE_RE='(\$\{?QA_GATE\}?"? +|qa-gate\.sh"? +)reconcile-tracker'
+
+assert_eq "gbv2-7M META: no reconcile_tracker call survives in the stripped qa-gate.sh" "0" \
+    "$(executable_refs "$META7_DIR/qa-gate.stripped.sh" 'reconcile_tracker')"
+assert_eq "gbv2-7M META: no reconcile-tracker invocation survives in the stripped Stop hook" "0" \
+    "$(executable_refs "$META7_DIR/verify-before-stop.stripped.sh" "$META7_VBS_INVOKE_RE")"
+
+# THE ANCHOR'S OWN SENSITIVITY PROOF. A check that was just relaxed and has never
+# been seen to fire is indistinguishable from a check that no longer works, so
+# both directions are demonstrated against COPIES.
+META7_CALL="$META7_DIR/qa-gate.callsurvives.sh"
+cp "$META7_DIR/qa-gate.stripped.sh" "$META7_CALL"
+printf 'reconcile_tracker || true\n' >> "$META7_CALL"
+assert_eq "gbv2-7M META: the anchor FIRES when a real call survives the strip" "1" \
+    "$(executable_refs "$META7_CALL" 'reconcile_tracker')"
+META7_PROSE="$META7_DIR/qa-gate.prosesurvives.sh"
+cp "$META7_DIR/qa-gate.stripped.sh" "$META7_PROSE"
+printf '    # a comment naming reconcile_tracker, which cannot be a call\n' >> "$META7_PROSE"
+assert_eq "gbv2-7M META: ...and does NOT fire on a comment naming it (the P7 false positive)" "0" \
+    "$(executable_refs "$META7_PROSE" 'reconcile_tracker')"
+# THE THIRD LEG (i8cx): the sharpened SUBCOMMAND anchor, both polarities.
+# Non-vacuity first: the anchor must see the real invocation in the SHIPPED
+# hook, and the fire-leg's line is extracted from there, never re-typed.
+META7_VBS_CALL_LINE=$(grep -E "$META7_VBS_INVOKE_RE" "$VBS7_REAL" | grep -v '^[[:space:]]*#' | head -1)
+assert_eq "gbv2-7M META: the SHIPPED hook carries a real reconcile-tracker invocation the sharpened anchor sees (extraction non-vacuity)" "yes" \
+    "$([ -n "$META7_VBS_CALL_LINE" ] && echo yes || echo no)"
+META7_VBS_PROSE="$META7_DIR/verify-before-stop.prosesurvives.sh"
+cp "$META7_DIR/verify-before-stop.stripped.sh" "$META7_VBS_PROSE"
+printf 'so the gate refuses instead, the same rule the reconcile-tracker and denylist blocks apply.\n' \
+    >> "$META7_VBS_PROSE"
+assert_eq "gbv2-7M META: ...and does NOT fire on operator-facing STRING prose naming the subcommand (the i8cx false positive)" "0" \
+    "$(executable_refs "$META7_VBS_PROSE" "$META7_VBS_INVOKE_RE")"
+META7_VBS_CALL="$META7_DIR/verify-before-stop.callsurvives.sh"
+cp "$META7_DIR/verify-before-stop.stripped.sh" "$META7_VBS_CALL"
+printf '%s\n' "$META7_VBS_CALL_LINE" >> "$META7_VBS_CALL"
+assert_eq "gbv2-7M META: ...while still FIRING when the real invocation line survives the strip" "1" \
+    "$(executable_refs "$META7_VBS_CALL" "$META7_VBS_INVOKE_RE")"
+# CONTROL: the old bare-text anchor would have failed BOTH of the above the same
+# way, which is the imprecision being removed — stated as an assertion so the
+# claim is measured rather than narrated.
+assert_eq "gbv2-7M META: the OLD text anchor could not tell the two apart (both non-zero)" \
+    "same" \
+    "$([ "$(grep -c 'reconcile_tracker' "$META7_CALL" | tr -d '[:space:]')" -gt 0 ] \
+       && [ "$(grep -c 'reconcile_tracker' "$META7_PROSE" | tr -d '[:space:]')" -gt 0 ] \
+       && echo same || echo differed)"
+assert_eq "gbv2-7M META: the stripped qa-gate.sh still parses" "0" \
+    "$(bash -n "$META7_DIR/qa-gate.stripped.sh" 2>/dev/null && echo 0 || echo 1)"
+assert_eq "gbv2-7M META: the stripped Stop hook still parses" "0" \
+    "$(bash -n "$META7_DIR/verify-before-stop.stripped.sh" 2>/dev/null && echo 0 || echo 1)"
+
+# Rebuild the exact §7 starting state: tracker = A only, B on disk, C baselined.
+meta7_reset_state() {
+    : > "$TRACK7"
+    printf '%s\n' "$F7/src/a.ts" > "$TRACK7"
+    printf 'export const b = 1;\n' > "$F7/src/b.ts"
+    bash "$CT7" set "$TID7"
+}
+
+# --- strip leg ---
+rm -f "$QG7" "$VBS7"
+cp "$META7_DIR/qa-gate.stripped.sh" "$QG7"
+cp "$META7_DIR/verify-before-stop.stripped.sh" "$VBS7"
+chmod +x "$QG7" "$VBS7"
+meta7_reset_state
+REASON7M=$(stop_reason "$F7")
+assert_eq "gbv2-7M META: with the reconcile stripped, B never reaches the tracker" "0" \
+    "$(grep -c -x -F "$F7/src/b.ts" "$TRACK7" | tr -d '[:space:]')"
+assert_not_contains "gbv2-7M META: ...and the block reason's absolute list omits it (7.2/7.5 WOULD fail)" \
+    "$F7/src/b.ts" "$REASON7M"
+assert_contains "gbv2-7M META: ...while A, which the hook DID record, is still named" \
+    "$F7/src/a.ts" "$REASON7M"
+
+# --- restore control: the shipped copies see B again ---
+rm -f "$QG7" "$VBS7"
+ln -sf "$QG7_REAL" "$QG7"
+ln -sf "$VBS7_REAL" "$VBS7"
+meta7_reset_state
+REASON7C=$(stop_reason "$F7")
+assert_eq "gbv2-7M META: restore control — the shipped copies reconcile B back in" "1" \
+    "$(grep -c -x -F "$F7/src/b.ts" "$TRACK7" | tr -d '[:space:]')"
+assert_contains "gbv2-7M META: restore control — and the block reason names it again" \
+    "$F7/src/b.ts" "$REASON7C"
+
+# ---------------------------------------------------------------------------
+# 7.6 THE RESIDUAL THE RECONCILE DOES *NOT* CLOSE — pinned, not merely described
+# (claude-workflow-plugin-dpe; QA finding R4-F1 against docs/HOOKS.md).
+#
+# 7.1/7.2 pin what the repair does: a Bash-written file that git can see is
+# folded into the tracker, so the change-set hash covers it. That is true for a
+# path git had nothing to say about at baseline capture. It is NOT true for a path
+# the baseline already carries an entry for, and the difference is invisible.
+#
+# THE MECHANISM. The baseline is subtracted with `comm -23` over raw
+# `git status --porcelain` LINES, which are not content-addressed. A second write
+# to an already-dirty path leaves " M src/c.ts" byte-identical, so it is
+# subtracted as pre-existing dirt however much the file changed. NO COMMIT is
+# involved — asserted below, because the function header's "work already
+# COMMITTED is invisible to git status" limit describes a different (narrower)
+# shape and a reader can otherwise conclude this one needs a commit too.
+#
+# WHY IT IS PINNED HERE RATHER THAN LEFT AS PROSE. `docs/HOOKS.md` shipped the
+# claim that the reconcile makes a Bash write "reach QA even though nothing
+# prevented it" — an assertion of coverage in the UNDER-coverage direction 94d
+# exists to close, and the stated reason for not re-scoping
+# prevent-orchestrator-edits.sh. A claim about what does and does not reach the
+# change set belongs in an assertion. C is the right file for it: the baseline
+# owns it (7.0), 7.2 already proves it stays OUT, and this adds the part that
+# matters — it stays out even after the session writes to it again.
+H_R0=$(CLAUDE_PROJECT_DIR="$F7" bash "$IR7" --hash-only 2>/dev/null)
+HEAD_R0=$(git -C "$F7" rev-parse HEAD 2>/dev/null)
+BASE_C_LINE=$(baseline_body "$BASE7" | grep 'src/c\.ts')
+# The write the reconcile is supposed to catch: no tool call, so no PostToolUse
+# event and no tracker entry from post-edit.sh.
+printf 'export const c2 = 2; // SECOND write, session work, Bash-mediated\n' >> "$F7/src/c.ts"
+assert_eq "gbv2-7.6: precondition — git sees a REAL content delta on the baselined path" "2" \
+    "$(git -C "$F7" diff --numstat -- src/c.ts | awk '{print $1}' | tr -d '[:space:]')"
+assert_eq "gbv2-7.6: ...while its porcelain line is BYTE-IDENTICAL to the baseline's (the enabling mechanism)" \
+    "$BASE_C_LINE" "$(dirt_lines "$F7" | grep 'src/c\.ts')"
+RECON76=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+# SUCCESS, and since 94d.1 not a SILENT success. The wording here used to read
+# "the miss is silent, which is what makes it dangerous", and that claim is now
+# false: §7S below pins that this same call NAMES src/c.ts as subtracted. The
+# hole itself is unchanged (the path still misses the tracker, the hash and the
+# block reason, and rc is still 0) — only its invisibility closed, so this leg
+# keeps measuring rc/ok and hands the readout question to §7S. Correcting the
+# text rather than leaving it is the R4-F1 lesson applied to the spec that
+# recorded R4-F1.
+assert_json_field "gbv2-7.6: the reconcile reports SUCCESS — rc 0 either way, which is why the miss needs the §7S accounting to be visible at all" \
+    "$RECON76" '.ok' "true"
+assert_contains "gbv2-7.6: ...and folded in NOTHING (added=0)" "(added=0)" "$RECON76"
+assert_eq "gbv2-7.6: the second write never reaches the tracker (comm -23 subtracted its unchanged line)" "0" \
+    "$(grep -c 'src/c\.ts' "$TRACK7" | tr -d '[:space:]')"
+assert_eq "gbv2-7.6: ...so the change-set hash is BLIND to it (an approval binds the old value)" \
+    "$H_R0" "$(CLAUDE_PROJECT_DIR="$F7" bash "$IR7" --hash-only 2>/dev/null)"
+assert_eq "gbv2-7.6: NO COMMIT was involved — this is WIDER than the committed-work limit" \
+    "$HEAD_R0" "$(git -C "$F7" rev-parse HEAD 2>/dev/null)"
+REASON76=$(stop_reason "$F7")
+assert_not_contains "gbv2-7.6: and the Stop's block reason never names it, so no reviewer is pointed at it" \
+    "$F7/src/c.ts" "$REASON76"
+# ...and that absence is a real absence. The reason's file list is capped at 15
+# with "...and N more files", so on a large change set an assert_not_contains
+# against it can pass for the truncation instead of for the behaviour — measured:
+# under §7R's mutant the tracker inflates past the cap and the leg above passes
+# vacuously. Here the tracker holds two paths, and this pins that.
+assert_not_contains "gbv2-7.6: ...and that absence is REAL, not the block reason's 15-path truncation" \
+    "more files" "$REASON76"
+
+# ---------------------------------------------------------------------------
+# 7.7 THE HALF THAT *IS* TRUE, in the same call. Without this leg 7.6 could pass
+# against a reconcile that had stopped working altogether, and the corrected
+# documentation would swing from over-claiming to under-claiming: a Bash write to
+# a path that was CLEAN at baseline capture really is folded in.
+printf 'export const e = 1; // Bash-written, clean at baseline capture\n' > "$F7/src/e.ts"
+assert_eq "gbv2-7.7: precondition — src/e.ts carries NO baseline entry" "0" \
+    "$(baseline_body "$BASE7" | grep -c 'src/e\.ts' | tr -d '[:space:]')"
+RECON77=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+assert_contains "gbv2-7.7: the SAME reconcile call folds THAT one in (added=1)" "(added=1)" "$RECON77"
+assert_eq "gbv2-7.7: ...tracked exactly once, absolute-spelled" "1" \
+    "$(grep -c -x -F "$F7/src/e.ts" "$TRACK7" | tr -d '[:space:]')"
+assert_eq "gbv2-7.7: ...and the hash MOVED for it" "moved" \
+    "$([ "$(CLAUDE_PROJECT_DIR="$F7" bash "$IR7" --hash-only 2>/dev/null)" != "$H_R0" ] && echo moved || echo unchanged)"
+assert_eq "gbv2-7.7: while the baselined path is STILL absent — one call, opposite answers" "0" \
+    "$(grep -c 'src/c\.ts' "$TRACK7" | tr -d '[:space:]')"
+
+# ---------------------------------------------------------------------------
+# 7R META: 7.6 is CAUSED by the baseline subtraction, not by an incidental filter.
+#
+# ONE VARIABLE: the branch deciding whether the baseline is subtracted at all is
+# forced to its "there is no baseline" arm. The `comm -23` call survives in the
+# copy, unreachable — so the denylist filter, the already-tracked filter, the
+# absolute spelling and the append are all byte-identical to the shipped code.
+#
+# Text-anchored on the branch, never a line number, and gated on
+# assert_mutant_applied — a substitution mutant that matches nothing is a
+# byte-identical copy, and this suite has shipped two of those (R4-F4).
+#
+# The mutant copy lives in the fixture's own `.claude/scripts/` so it keeps
+# resolving its sibling `workflow-denylist.sh` (BASH_SOURCE-relative). Parked
+# anywhere else it would refuse to run at all, and the flip below would be the
+# refusal rather than the missing subtraction.
+QG7_NOSUB="$F7/.claude/scripts/qa-gate-nobasesub.sh"
+awk '
+    !done && /^[[:space:]]*if \[ -z "\$baseline" \]; then[[:space:]]*$/ {
+        print "    if true; then"; done=1; next
+    }
+    { print }
+' "$QG7_REAL" > "$QG7_NOSUB"
+chmod +x "$QG7_NOSUB"
+if assert_mutant_applied "gbv2-7R META" "$QG7_REAL" "$QG7_NOSUB"; then
+    assert_eq "gbv2-7R META: the subtraction branch is gone from the copy (the mutation landed where it was aimed)" \
+        "0" "$(grep -c 'if \[ -z "\$baseline" \]' "$QG7_NOSUB" | tr -d '[:space:]')"
+    assert_eq "gbv2-7R META: ...replaced by exactly one forced branch" "1" \
+        "$(grep -c '^    if true; then$' "$QG7_NOSUB" | tr -d '[:space:]')"
+    assert_eq "gbv2-7R META: the comm -23 call SURVIVES in the copy (the body is untouched; only its guard moved)" \
+        "1" "$(grep -c 'comm -23 <(printf' "$QG7_NOSUB" | tr -d '[:space:]')"
+    assert_eq "gbv2-7R META: the copy still parses as bash" "0" \
+        "$(bash -n "$QG7_NOSUB" 2>/dev/null && echo 0 || echo 1)"
+    # CONTROL FIRST: the mutant must still be a FAITHFUL reconciler in every other
+    # respect, or "C came back" could mean "the filters stopped running".
+    mkdir -p "$F7/node_modules/dep"
+    printf 'module.exports = 1;\n' > "$F7/node_modules/dep/index.js"
+    RECON7R=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7_NOSUB" reconcile-tracker 2>&1 | tail -1)
+    assert_json_field "gbv2-7R META control: the mutant still reconciles successfully" "$RECON7R" '.ok' "true"
+    assert_eq "gbv2-7R META control: ...and still applies the DENYLIST (node_modules stays out)" "0" \
+        "$(grep -c 'node_modules' "$TRACK7" | tr -d '[:space:]')"
+    # THE FLIP: with the baseline unsubtracted, the second write to the baselined
+    # path enters the tracker — so 7.6's absence assertion is caused by the
+    # subtraction and nothing else.
+    assert_eq "gbv2-7R META: WITHOUT the baseline subtraction the baselined path IS reconciled in (7.6 WOULD fail)" \
+        "1" "$(grep -c -x -F "$F7/src/c.ts" "$TRACK7" | tr -d '[:space:]')"
+    # RESTORE CONTROL: same tree, same dirt, shipped script — C drops out again.
+    printf '%s\n%s\n%s\n' "$F7/src/a.ts" "$F7/src/b.ts" "$F7/src/e.ts" > "$TRACK7"
+    CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker >/dev/null 2>&1
+    assert_eq "gbv2-7R META: restore control — the shipped script leaves it out again" "0" \
+        "$(grep -c -x -F "$F7/src/c.ts" "$TRACK7" | tr -d '[:space:]')"
+    rm -rf "$F7/node_modules"
+fi
+
+# ---------------------------------------------------------------------------
+# 7S THE DROP IS NO LONGER SILENT — the visibility half of
+# claude-workflow-plugin-94d.1.
+#
+# WHAT WENT WRONG, on this repo's own 94d review. A conversation compacted;
+# SessionStart's unconditional `rm -f changed-files.txt` fired; `qa-gate.sh
+# enter` then rebuilt the tracker from `git status` minus a 35-hour-old,
+# 159-entry gate baseline. 26 paths became 10. change_set_hash moved
+# 01296db9... -> 0b5a546e... EVERY STEP REPORTED ok:true, and the reconcile's
+# readout was `+10 git-visible path(s) ... (added=10)` — which is exactly what a
+# healthy call looks like. That is worse than the empty-set case it replaced:
+# before P1 a destroyed tracker hashed to e3b0c442... (the empty list), which is
+# loudly, self-announcingly wrong. P1's reconciler is what made the truncated
+# set look correct.
+#
+# WHAT IS PINNED HERE, and what deliberately is NOT. The residual 7.6 measures is
+# unchanged and unfixed: a baselined path still misses the tracker, the hash and
+# the block reason. What 7S pins is that the miss is now COUNTED and NAMED, that
+# a rebuild from an empty tracker SAYS SO, and that the two together refuse an
+# approve — because the thing that made the loss expensive was not the loss, it
+# was that nothing in any readout mentioned it.
+#
+# The state is the one 7R's restore-control left: src/c.ts baselined and written
+# a second time, absent from the tracker; a.ts / b.ts / e.ts tracked.
+assert_eq "gbv2-7S.0: precondition — the baselined path is still absent from the tracker" "0" \
+    "$(grep -c 'src/c\.ts' "$TRACK7" | tr -d '[:space:]')"
+assert_eq "gbv2-7S.0: precondition — and git still sees it as dirty" "1" \
+    "$(dirt_lines "$F7" | grep -c 'src/c\.ts' | tr -d '[:space:]')"
+
+RECON7S=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+SUBFILE7="$F7/.claude/.qa-tracking/reconcile-subtracted.txt"
+# THE LEG THAT WOULD HAVE CAUGHT 94d.1. `added=0` may not stand alone.
+assert_contains "gbv2-7S.1: the readout COUNTS what the baseline subtracted (added=0 no longer stands alone)" \
+    "SUBTRACTED 1 git-visible path(s)" "$RECON7S"
+assert_contains "gbv2-7S.1: ...and NAMES it, absolute-spelled, the way the tracker would have" \
+    "$F7/src/c.ts" "$RECON7S"
+assert_contains "gbv2-7S.1: ...saying which question it CANNOT answer about that path" \
+    "CANNOT distinguish pre-existing arrival dirt from session work whose tracker entry was lost" "$RECON7S"
+assert_json_field "gbv2-7S.1: ...while still succeeding (rc 0 is deliberate: subtraction is the baseline's job)" \
+    "$RECON7S" '.ok' "true"
+assert_eq "gbv2-7S.1: the full list is durable too — the sidecar holds exactly that path" "1" \
+    "$(grep -c -x -F "$F7/src/c.ts" "$SUBFILE7" 2>/dev/null | tr -d '[:space:]')"
+# ANTI-OVERREACH: a path the tracker ALREADY covers is not reported as dropped.
+# Without this, "subtracted" could just be "everything the baseline holds", which
+# would bury the one entry that matters under every pre-existing dirty path.
+assert_eq "gbv2-7S.1: ANTI-OVERREACH — a tracked path is NOT reported as subtracted" "0" \
+    "$(grep -c -x -F "$F7/src/a.ts" "$SUBFILE7" 2>/dev/null | tr -d '[:space:]')"
+
+# 7S.2 THE REBUILD ANNOUNCEMENT. reconcile cannot tell "no tool edit has happened
+# yet" from "the tracker was destroyed" — so it must say which it assumed. This is
+# the leg that speaks to the 94d.1 sequence directly: the tracker was gone, and
+# the rebuild presented itself as a normal reconcile.
+: > "$TRACK7"
+RECON7S2=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+assert_contains "gbv2-7S.2: a rebuild from an EMPTY tracker announces itself" \
+    "REBUILT FROM AN EMPTY TRACKER" "$RECON7S2"
+assert_contains "gbv2-7S.2: ...naming the assumption it made rather than implying certainty" \
+    "ASSUMPTION MADE" "$RECON7S2"
+assert_contains "gbv2-7S.2: ...and stating it is not a recovery path (Channel B is unrecoverable here)" \
+    "NOT a recovery path" "$RECON7S2"
+assert_contains "gbv2-7S.2: ...with the durable line in sync-errors.log, because a cycle is in flight" \
+    "absent-or-empty while a gate cycle was in flight" \
+    "$(cat "$F7/.claude/.qa-tracking/sync-errors.log" 2>/dev/null || echo '')"
+
+# 7S.3 THE REFUSAL. fkm.1.2 half (b) asked approve to refuse on an EMPTY change
+# set; post-P1 that state is unreachable (the reconcile fills the tracker), so the
+# predicate is "reconstructed AND provably short" instead. Both inputs come from
+# outside the tracker's contents — which is the point: the impact-report freshness
+# check compares two hashes BOTH derived from the truncated tracker, so it sees
+# drift and is blind to loss.
+: > "$TRACK7"
+bash "$CT7" set "$TID7" >/dev/null 2>&1
+RC7S3=0
+# Captured RAW and split afterwards, not through `| tail -1`: a pipeline's exit
+# status is the LAST command's, so `... | tail -1) || RC=$?` records tail's 0 and
+# the rc assertion can never fail. Same shape as approve-idempotency.sh's H2.
+RAW7S3=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" approve "$TID7" "reviewed" 2>&1) || RC7S3=$?
+OUT7S3=$(printf '%s\n' "$RAW7S3" | tail -1)
+assert_eq "gbv2-7S.3: approve REFUSES a reconstructed, provably-short change set (exit 2)" "2" "$RC7S3"
+assert_json_field "gbv2-7S.3: ...with error_key=change_set_reconstructed" \
+    "$OUT7S3" '.error_key' "change_set_reconstructed"
+assert_contains "gbv2-7S.3: ...naming the dropped path so the operator can decide" \
+    "$F7/src/c.ts" "$OUT7S3"
+assert_contains "gbv2-7S.3: ...and printing the bypass, so a legitimate case is not deadlocked" \
+    "--accept-reconstructed" "$OUT7S3"
+
+# 7S.4 THE CONTROL THAT MAKES 7S.3 MEAN SOMETHING. Same tree, same baselined
+# src/c.ts, same subtraction — only the tracker is non-empty. The refusal must NOT
+# fire, or it would be "subtracted>0" (which every dirty-on-arrival repo produces
+# on every call) rather than "the change set was reconstructed".
+printf '%s\n' "$F7/src/a.ts" > "$TRACK7"
+bash "$CT7" set "$TID7" >/dev/null 2>&1
+RC7S4=0
+OUT7S4=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" approve "$TID7" "reviewed" 2>&1 | tail -1) || RC7S4=$?
+assert_eq "gbv2-7S.4: CONTROL — with a NON-empty tracker the reconstruction refusal does not fire" \
+    "no" "$(printf '%s' "$OUT7S4" | jq -r '.error_key // "none"' 2>/dev/null | grep -q change_set_reconstructed && echo yes || echo no)"
+RECON7S4=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+assert_contains "gbv2-7S.4: ...while the subtraction is STILL reported (reporting is not gated on the refusal)" \
+    "SUBTRACTED" "$RECON7S4"
+assert_eq "gbv2-7S.4: ...and rebuild-from-empty is NOT claimed for a populated tracker" "0" \
+    "$(printf '%s' "$RECON7S4" | grep -c 'REBUILT FROM AN EMPTY TRACKER' | tr -d '[:space:]')"
+
+# 7S.5 THE AUDITED BYPASS. The observation is inferential — a destroyed tracker
+# and an all-Bash session in a repo dirty on arrival are identical to the
+# reconcile — so a human verdict has to be able to clear it, with the reason
+# recorded. Asserted as "this gate is no longer what refuses": the fixture has no
+# review artifact, so approve correctly stops at the NEXT precondition.
+: > "$TRACK7"
+bash "$CT7" set "$TID7" >/dev/null 2>&1
+OUT7S5=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" approve "$TID7" \
+    --accept-reconstructed 'measured: the dropped path is pre-existing arrival dirt' \
+    "reviewed" 2>&1 | tail -1) || true
+assert_eq "gbv2-7S.5: --accept-reconstructed clears THIS refusal (approve moves on to the next precondition)" \
+    "no" "$(printf '%s' "$OUT7S5" | jq -r '.error_key // "none"' 2>/dev/null | grep -q change_set_reconstructed && echo yes || echo no)"
+# The empty reason is spelled `''`, not omitted: the flag takes the NEXT argument
+# whatever it is, so `--accept-reconstructed "reviewed"` swallows the summary and
+# fails on usage instead — which would pass an `error_key` assertion for entirely
+# the wrong reason. This is the shape the other two bypasses are tested in too.
+OUT7S5B=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" approve "$TID7" --accept-reconstructed '' "reviewed" 2>&1 | tail -1) || true
+assert_json_field "gbv2-7S.5: ...and an UNEXPLAINED bypass is refused, like the other two" \
+    "$OUT7S5B" '.error_key' "bypass_reason_required"
+
+# ---------------------------------------------------------------------------
+# 7SM META: strip the SUBTRACTION-ACCOUNTING regions ALONE and the same call goes
+# back to the pre-94d.1 silent success.
+#
+# The accounting has its OWN sentinels, nested inside TRACKER-RECONCILE, precisely
+# so this META can excise the reporting while leaving the reconcile itself
+# byte-identical. `account_obs` is declared OUTSIDE those sentinels (see the
+# comment at its declaration), so the stripped copy is coherent and every
+# observation reverts to its exact pre-94d.1 text rather than dying on an unset
+# variable — which would make this META pass for the wrong reason.
+#
+# It also flips the REFUSAL, because RECONCILE_SUBTRACTED / _REBUILT_FROM_EMPTY
+# are only ever set inside the region: with it gone they keep their function-top
+# zeros and cmd_approve's guard is inert. One strip, both halves of 94d.1's
+# visibility, which is the honest shape — the refusal has no independent evidence.
+strip_subtraction_accounting() {
+    # strip_subtraction_accounting <src> <dst>. Anchored `^ *#` for the reason
+    # R4-F5 gives: unanchored, a future prose line naming the sentinel mid-
+    # sentence would start the excision early and delete real code above it.
+    awk '
+        /^ *# SUBTRACTION-ACCOUNTING BEGIN/ { skip = 1; next }
+        /^ *# SUBTRACTION-ACCOUNTING END/   { skip = 0; next }
+        !skip { print }
+    ' "$1" > "$2"
+}
+QG7_NOACC="$F7/.claude/scripts/qa-gate-noaccount.sh"
+strip_subtraction_accounting "$QG7_REAL" "$QG7_NOACC"
+chmod +x "$QG7_NOACC"
+if assert_mutant_applied "gbv2-7SM META" "$QG7_REAL" "$QG7_NOACC"; then
+    assert_eq "gbv2-7SM META: the strip removed lines (non-vacuous)" "smaller" \
+        "$([ "$(grep -c . "$QG7_NOACC")" -lt "$(grep -c . "$QG7_REAL")" ] && echo smaller || echo same)"
+    assert_eq "gbv2-7SM META: no comm -12 complement survives in the copy (the mutation landed where it was aimed)" \
+        "0" "$(grep -c 'comm -12' "$QG7_NOACC" | tr -d '[:space:]')"
+    assert_eq "gbv2-7SM META: the comm -23 SUBTRACTION itself survives (only the accounting was removed)" \
+        "1" "$(grep -c 'comm -23 <(printf' "$QG7_NOACC" | tr -d '[:space:]')"
+    assert_eq "gbv2-7SM META: account_obs is still DECLARED, so the copy is coherent rather than crashing" \
+        "1" "$(grep -c 'local account_obs=""' "$QG7_NOACC" | tr -d '[:space:]')"
+    assert_eq "gbv2-7SM META: the copy still parses as bash" "0" \
+        "$(bash -n "$QG7_NOACC" 2>/dev/null && echo 0 || echo 1)"
+
+    # THE FLIP, half 1: the readout. Same tree, same subtraction, same emptied
+    # tracker as 7S.2 — and the mutant says nothing about either.
+    : > "$TRACK7"
+    RECON7SM=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7_NOACC" reconcile-tracker 2>&1 | tail -1)
+    assert_json_field "gbv2-7SM META control: the mutant still reconciles successfully" \
+        "$RECON7SM" '.ok' "true"
+    assert_eq "gbv2-7SM META control: ...and still folds the un-baselined paths in (it is a faithful reconciler)" \
+        "1" "$(grep -c -x -F "$F7/src/b.ts" "$TRACK7" | tr -d '[:space:]')"
+    assert_eq "gbv2-7SM META: with the accounting stripped the drop is SILENT again (7S.1 WOULD fail)" "0" \
+        "$(printf '%s' "$RECON7SM" | grep -c 'SUBTRACTED' | tr -d '[:space:]')"
+    assert_eq "gbv2-7SM META: ...not even the bare count survives (7S.1 WOULD fail)" "0" \
+        "$(printf '%s' "$RECON7SM" | grep -c 'subtracted=' | tr -d '[:space:]')"
+    assert_eq "gbv2-7SM META: ...and the rebuild is not announced (7S.2 WOULD fail)" "0" \
+        "$(printf '%s' "$RECON7SM" | grep -c 'REBUILT FROM AN EMPTY TRACKER' | tr -d '[:space:]')"
+
+    # THE FLIP, half 2: the refusal goes inert.
+    : > "$TRACK7"
+    bash "$CT7" set "$TID7" >/dev/null 2>&1
+    OUT7SM=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7_NOACC" approve "$TID7" "reviewed" 2>&1 | tail -1) || true
+    assert_eq "gbv2-7SM META: ...so approve stops refusing a reconstructed change set (7S.3 WOULD fail)" \
+        "no" "$(printf '%s' "$OUT7SM" | jq -r '.error_key // "none"' 2>/dev/null | grep -q change_set_reconstructed && echo yes || echo no)"
+
+    # RESTORE CONTROL: identical state, shipped script, both halves return.
+    : > "$TRACK7"
+    RECON7SC=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+    assert_contains "gbv2-7SM META: restore control — the shipped script counts the drop again" \
+        "SUBTRACTED" "$RECON7SC"
+    : > "$TRACK7"
+    bash "$CT7" set "$TID7" >/dev/null 2>&1
+    RC7SC=0
+    OUT7SC=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" approve "$TID7" "reviewed" 2>&1 | tail -1) || RC7SC=$?
+    assert_json_field "gbv2-7SM META: restore control — and refuses again" \
+        "$OUT7SC" '.error_key' "change_set_reconstructed"
+fi
+
+# ---------------------------------------------------------------------------
+# 7S.6 THE THIRD CONDITION, pinned — an EMPTY rebuilt set is NOT refused.
+#
+# The refusal needs a NON-EMPTY reconstruction (`added > 0`), and that clause is
+# not decorative. Without it the same predicate fires on `added=0, subtracted>0`
+# — an empty change set with baselined dirt around it — which is the normal shape
+# of a task closed with no code change, of the doc-only fast path, and of any
+# session that did nothing in a checkout that was dirty on arrival. Measured, not
+# hypothesised: that state broke the L1 qa-gate-choose and qa-gate-grade-record
+# fixtures (30 and 90 assertions) when the clause was absent, and their single
+# "subtracted" entry was the fixture's own untracked .claude/scripts/ directory.
+#
+# LAST in the section deliberately: producing `added=0` means baselining the WHOLE
+# dirty tree, which would invalidate every leg above that depends on a.ts / b.ts /
+# e.ts being un-baselined.
+: > "$TRACK7"
+rm -f "$BASE7"
+CLAUDE_PROJECT_DIR="$F7" bash "$QG7" baseline-capture --by test-harness >/dev/null 2>&1
+RECON7S6=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" reconcile-tracker 2>&1 | tail -1)
+assert_contains "gbv2-7S.6: precondition — with everything baselined the rebuild adds NOTHING" \
+    "(added=0)" "$RECON7S6"
+assert_contains "gbv2-7S.6: precondition — while still reporting what it subtracted" \
+    "SUBTRACTED" "$RECON7S6"
+assert_contains "gbv2-7S.6: precondition — and still announcing the rebuild-from-empty" \
+    "REBUILT FROM AN EMPTY TRACKER" "$RECON7S6"
+: > "$TRACK7"
+bash "$CT7" set "$TID7" >/dev/null 2>&1
+OUT7S6=$(CLAUDE_PROJECT_DIR="$F7" bash "$QG7" approve "$TID7" "reviewed" 2>&1 | tail -1) || true
+assert_eq "gbv2-7S.6: an EMPTY reconstructed change set is NOT refused (the third condition)" \
+    "no" "$(printf '%s' "$OUT7S6" | jq -r '.error_key // "none"' 2>/dev/null | grep -q change_set_reconstructed && echo yes || echo no)"
+
+# ===========================================================================
+# SECTION 8 — AN EMPTY SNAPSHOT IS A VALID BASELINE (94d).
+#
+# THE DEFECT. write_gate_baseline built the file with a brace group whose last
+# command was `[ -n "$status_out" ] && printf '%s\n' "$status_out"`. A group takes
+# the exit status of its last command, so on an EMPTY snapshot the false test made
+# the whole group "fail": the error handler deleted the tmp file it had just
+# written correctly, logged "could not write", and returned 1.
+#
+# An empty snapshot is not an exotic state — it is the normal state of a CLEAN
+# tree, and of an `--exclude-tracked` capture where every dirty path is already
+# in the tracker. So exactly those cases silently got NO baseline: `enter
+# --if-missing` could never find one to skip, and `baseline-capture` answered
+# ok:false / exit 2 on a clean checkout, i.e. the mechanism reported itself broken
+# in the one situation where nothing was wrong.
+#
+# Found while giving the L2 gate fixtures a .gitignore for 94d — the fixtures had
+# always been dirty enough to hide it. Reproduced with ONE variable isolated
+# (clean tree fails, one dirty file succeeds), which is what section 8.2 pins.
+# ===========================================================================
+mk_fixture
+F8="$COMPONENT_FIXTURE_PATH"
+BASE8="$F8/.claude/.qa-tracking/gate-baseline"
+QG8="$F8/.claude/scripts/qa-gate.sh"
+
+# A repo whose tree is genuinely CLEAN: everything the fixture ships is either
+# committed or gitignored.
+printf '.claude/\nbin/\n' > "$F8/.gitignore"
+printf 'export const s = 0;\n' > "$F8/src8.ts"
+(cd "$F8" && git init -q && git config user.email t@t.t && git config user.name t \
+    && git add -A && git commit -qm baseline) >/dev/null 2>&1
+assert_eq "gbv2-8.0: precondition — the tree is CLEAN (empty porcelain)" "0" \
+    "$(dirt_lines "$F8" | grep -c . | tr -d '[:space:]')"
+
+rm -f "$BASE8"
+CAP8=$(CLAUDE_PROJECT_DIR="$F8" bash "$QG8" baseline-capture --by test-harness 2>&1 | tail -1)
+assert_json_field "gbv2-8.1: baseline-capture on a clean tree SUCCEEDS (was ok:false, exit 2)" \
+    "$CAP8" '.status' "captured"
+assert_json_field "gbv2-8.1: ...and reports ok:true" "$CAP8" '.ok' "true"
+assert_eq "gbv2-8.1: ...and the file EXISTS (was deleted by its own error handler)" "yes" \
+    "$([ -f "$BASE8" ] && echo yes || echo no)"
+assert_eq "gbv2-8.1: ...with the v2 header intact" "# gate-baseline v1" "$(head -1 "$BASE8")"
+assert_eq "gbv2-8.1: ...provenance recorded" "test-harness" "$(baseline_header_field "$BASE8" captured_by)"
+assert_eq "gbv2-8.1: ...and an EMPTY snapshot body, which is the correct answer" "0" \
+    "$(baseline_body "$BASE8" | grep -c . | tr -d '[:space:]')"
+# `grep -c` on a MISSING file prints nothing at all (it errors), so the count has
+# to be defaulted — otherwise the healthiest possible state, no log file, reads as
+# an empty string and fails. The `|| true` keeps the no-match exit 1 from
+# aborting under the runner's shell.
+CW8=$(grep -c 'could not write' "$F8/.claude/.qa-tracking/sync-errors.log" 2>/dev/null || true)
+CW8=$(printf '%s' "$CW8" | head -1 | tr -d '[:space:]')
+assert_eq "gbv2-8.1: ...and sync-errors.log carries no 'could not write' line" "0" "${CW8:-0}"
+
+# 8.2 THE DISCRIMINATOR: one dirty file is the only variable between the failing
+# and passing states, and the non-empty case must still behave. Without this, 8.1
+# would also pass against a writer that ignored $status_out entirely.
+printf 'export const d = 1;\n' > "$F8/dirty8.ts"
+rm -f "$BASE8"
+CLAUDE_PROJECT_DIR="$F8" bash "$QG8" baseline-capture --by test-harness >/dev/null 2>&1
+assert_eq "gbv2-8.2: with ONE dirty file the snapshot carries exactly that entry" "1" \
+    "$(baseline_body "$BASE8" | grep -c 'dirty8\.ts' | tr -d '[:space:]')"
+assert_eq "gbv2-8.2: ...and nothing else" "1" \
+    "$(baseline_body "$BASE8" | grep -c . | tr -d '[:space:]')"
+
+# 8.3 The consequence `--if-missing` depends on: an empty baseline is a PRESENT
+# baseline, so a later enter must not overwrite it. Pre-fix there was no file to
+# find, so every enter re-captured — against a tree that had meanwhile changed.
+rm -f "$F8/dirty8.ts" "$BASE8"
+CLAUDE_PROJECT_DIR="$F8" bash "$QG8" baseline-capture --by test-harness >/dev/null 2>&1
+B8_BEFORE=$(cat "$BASE8")
+printf 'export const later = 1;\n' > "$F8/later8.ts"
+CLAUDE_PROJECT_DIR="$F8" bash "$QG8" baseline-capture --by second-writer --if-missing >/dev/null 2>&1
+assert_eq "gbv2-8.3: an EMPTY baseline still satisfies --if-missing (byte-identical)" \
+    "$B8_BEFORE" "$(cat "$BASE8")"
+assert_eq "gbv2-8.3: ...so the later dirt is NOT baselined and still gates" "0" \
+    "$(baseline_body "$BASE8" | grep -c 'later8\.ts' | tr -d '[:space:]')"
+
+# ===========================================================================
+# SECTION 9 — THE BASELINE IS BOUND TO THE HEAD IT WAS CAPTURED AT
+# (claude-workflow-plugin-bbes).
+#
+# THE DEFECT. Sections 7.6/7.7 (claude-workflow-plugin-dpe) already pin that a
+# SECOND WRITE to an already-baselined path is invisible to the reconcile —
+# `comm -23`/`comm -12` compare raw porcelain LINES, and a line is not
+# content-addressed. dpe's own limit is explicitly WIDER than this one (no
+# commit needed at all — a second write in the SAME session already triggers
+# it) and stays exactly as it was; bbes does not touch it. bbes is the
+# narrower, separately-discovered shape: a path is baselined dirty, gets
+# COMMITTED (the dirt is genuinely gone), and is later re-dirtied — ordinary,
+# because one review wave's hot files are usually the next wave's hot files
+# too. The porcelain LINE for "modified relative to HEAD" is identical text
+# regardless of which HEAD it is relative to, so the stale baseline entry
+# matches the fresh dirt byte-for-byte and subtracts it, even though the two
+# are different facts about different content at different commits.
+#
+# FOUND LIVE at the i8cx wave-1 gate (2026-08-26): a baseline captured while
+# .claude/scripts/qa-gate.sh and 8 other paths were dirty; those paths were
+# committed; the next wave re-dirtied the SAME paths. 9 reviewable paths,
+# including that wave's own principal file, would have been silently
+# subtracted from the bound change set had QA not hand-repaired the tracker
+# before `enter`. 94d.1's `change_set_reconstructed` refusal does not catch
+# this shape: it fires on an EMPTY tracker, and here the tracker was
+# non-empty — merely incomplete.
+#
+# THE FIX under test: gate_baseline_entries now compares the baseline
+# header's `head=` (recorded by write_gate_baseline since 3mg.1, never read
+# back until now) against the CURRENT head and, only when they differ, drops
+# any entry whose path a commit touched in between
+# (gate_baseline_bind_to_head above carries the full four-case contract this
+# section pins one at a time).
+#
+# THE CORE PAIR (9.0-9.3): two files, ONE reconcile call, opposite answers —
+# the same shape 7.6/7.7 already use for the no-commit residual:
+#   g.ts  baselined dirty, COMMITTED, re-dirtied  -> must SURVIVE (the fix)
+#   h.ts  baselined dirty, NEVER committed         -> must stay OUT (dpe's
+#         residual, unchanged — the negative control the task itself asks
+#         for: "otherwise the fix has simply disabled baselining")
+# 9.4/9.5 pin the two FAIL-CLOSED sub-cases of "HEAD unreadable, or git
+# otherwise cannot answer" (gate_baseline_bind_to_head's case 4). 9M is the
+# mutation pairing: a mutant with only the head-bind CALL removed reproduces
+# the ORIGINAL bug on the exact 9.3 scenario, and a restore control against
+# the shipped script closes it again.
+#
+# No bd_required_or_skip: both `reconcile-tracker` and `baseline-capture` are
+# explicitly bd-independent (see their own subcommand docs), and this section
+# calls neither `enter` nor `bd` — so, unlike most of this file, section 9
+# runs unchanged under BD_SHIM_ONLY=1 CI.
+# ===========================================================================
+mk_fixture
+F9="$COMPONENT_FIXTURE_PATH"
+TRACK9="$F9/.claude/.qa-tracking/changed-files.txt"
+BASE9="$F9/.claude/.qa-tracking/gate-baseline"
+SUBFILE9="$F9/.claude/.qa-tracking/reconcile-subtracted.txt"
+LOG9="$F9/.claude/.qa-tracking/sync-errors.log"
+QG9="$F9/.claude/scripts/qa-gate.sh"
+CT9="$F9/.claude/scripts/current-task.sh"
+
+mkdir -p "$F9/src"
+printf 'export const g = 0;\n' > "$F9/src/g.ts"
+printf 'export const h = 0;\n' > "$F9/src/h.ts"
+git_fixture_init "$F9"
+H0=$(git -C "$F9" rev-parse HEAD 2>/dev/null)
+assert_match "gbv2-9.0: precondition — git_fixture_init produced a real HEAD (H0)" \
+    '^[0-9a-f]{7,40}$' "$H0"
+
+# 9.0 Dirty BOTH paths identically and capture the baseline while both are
+# dirty — the ordinary "review cycle opens on a dirty tree" moment.
+printf 'export const g = 1; // wave 1\n' > "$F9/src/g.ts"
+printf 'export const h = 1; // wave 1\n' > "$F9/src/h.ts"
+assert_eq "gbv2-9.0: precondition — exactly g.ts and h.ts are dirty before baseline capture" "2" \
+    "$(dirt_lines "$F9" | grep -c . | tr -d '[:space:]')"
+: > "$TRACK9"
+bash "$CT9" clear
+rm -f "$BASE9"
+CLAUDE_PROJECT_DIR="$F9" bash "$QG9" baseline-capture --by test-harness >/dev/null 2>&1
+assert_eq "gbv2-9.0: the baseline was captured at H0 (head= is bound, not just written)" \
+    "$H0" "$(baseline_header_field "$BASE9" head)"
+assert_eq "gbv2-9.0: both g.ts and h.ts are in the baseline body" "2" \
+    "$(baseline_body "$BASE9" | grep -c -E 'src/[gh]\.ts' | tr -d '[:space:]')"
+
+# 9.1 Land g.ts (the "dirt is gone" step) — h.ts stays dirty, uncommitted, so
+# it remains the negative control's own genuinely-unresolved old dirt.
+(cd "$F9" && git add src/g.ts && git commit -qm "wave 1: land g") >/dev/null 2>&1
+H1=$(git -C "$F9" rev-parse HEAD 2>/dev/null)
+assert_match "gbv2-9.1: precondition — the commit produced a real sha (H1)" \
+    '^[0-9a-f]{7,40}$' "$H1"
+assert_eq "gbv2-9.1: precondition — HEAD actually moved (H1 != H0)" "moved" \
+    "$([ -n "$H1" ] && [ "$H1" != "$H0" ] && echo moved || echo unchanged)"
+assert_eq "gbv2-9.1: precondition — g.ts is now CLEAN (the commit captured it exactly)" "0" \
+    "$(dirt_lines "$F9" | grep -c 'src/g\.ts' | tr -d '[:space:]')"
+assert_eq "gbv2-9.1: precondition — h.ts is STILL dirty, never committed" "1" \
+    "$(dirt_lines "$F9" | grep -c 'src/h\.ts' | tr -d '[:space:]')"
+assert_eq "gbv2-9.1: precondition — the baseline FILE itself is untouched, still names H0" \
+    "$H0" "$(baseline_header_field "$BASE9" head)"
+
+# 9.2 Re-dirty g.ts — wave 2 touching the same file wave 1 did. SAME status
+# code as the original baseline entry, now relative to H1 instead of H0: the
+# exact enabling mechanism 7.6 names for the no-commit residual, here with a
+# real commit in between.
+printf 'export const g = 2; // wave 2, re-dirtied after landing\n' > "$F9/src/g.ts"
+G_LINE=$(dirt_lines "$F9" | grep 'src/g\.ts')
+H_LINE=$(dirt_lines "$F9" | grep 'src/h\.ts')
+assert_eq "gbv2-9.2: precondition — g's wave-2 porcelain line is BYTE-IDENTICAL to its baseline entry (the enabling mechanism)" \
+    "yes" "$(baseline_body "$BASE9" | grep -qxF "$G_LINE" && echo yes || echo no)"
+assert_eq "gbv2-9.2: precondition — h's still-dirty porcelain line is ALSO byte-identical to its own baseline entry" \
+    "yes" "$(baseline_body "$BASE9" | grep -qxF "$H_LINE" && echo yes || echo no)"
+
+# 9.3 ONE reconcile call, both files, opposite answers.
+: > "$TRACK9"
+RECON9=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+assert_json_field "gbv2-9.3: reconcile-tracker succeeds (a narrower baseline is a soft degrade, never a hard refusal)" \
+    "$RECON9" '.ok' "true"
+
+# THE FIX, pinned: g.ts (committed since baseline capture, then re-dirtied)
+# IS folded into the tracker.
+assert_eq "gbv2-9.3: POSITIVE LEG — g.ts (committed, then re-dirtied) IS reconciled into the tracker" "1" \
+    "$(grep -c -x -F "$F9/src/g.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.3: ...and the reconcile's own readout counts it (added=1)" \
+    "(added=1)" "$RECON9"
+
+# THE NEGATIVE CONTROL, same call: h.ts was NEVER committed, so the very same
+# baseline entry still legitimately describes it — it must stay excluded, or
+# the fix has simply disabled baselining altogether (the task's own framing).
+assert_eq "gbv2-9.3: NEGATIVE CONTROL — h.ts (never committed, same old dirt) stays OUT of the tracker" "0" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.3: ...and IS named in the subtraction accounting (94d.1's visibility; not a silent drop)" \
+    "$F9/src/h.ts" "$RECON9"
+assert_eq "gbv2-9.3: ...durably, in the sidecar too" "1" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$SUBFILE9" 2>/dev/null | tr -d '[:space:]')"
+assert_not_contains "gbv2-9.3: ANTI-OVERREACH — g.ts is NOT reported as subtracted (it was added, not dropped)" \
+    "$F9/src/g.ts" "$(cat "$SUBFILE9" 2>/dev/null || echo '')"
+
+# Snapshot the H0-recorded, both-entries baseline now, before 9.4/9.5 mutate
+# it — 9M replays the exact 9.3 scenario against a mutant and needs it back.
+cp "$BASE9" "$F9/.claude/.qa-tracking/gate-baseline.9-snapshot"
+
+# ---------------------------------------------------------------------------
+# 9.4 CASE 4b — git CANNOT verify the recorded head (history rewritten or
+# pruned since capture: the baseline names a commit that no longer resolves).
+# FAIL CLOSED: h.ts's entry — which 9.3 just proved is correctly subtracted
+# when the recorded head IS resolvable — must NOT be trusted when it is not.
+BOGUS_SHA="0123456789abcdef0123456789abcdef01234567"
+assert_eq "gbv2-9.4: precondition — the bogus sha does not resolve in this repo" "no" \
+    "$(git -C "$F9" cat-file -e "$BOGUS_SHA" 2>/dev/null && echo yes || echo no)"
+sed -i.bak "s/^head=.*/head=$BOGUS_SHA/" "$BASE9" && rm -f "$BASE9.bak"
+assert_eq "gbv2-9.4: precondition — the baseline now names an unresolvable head" \
+    "$BOGUS_SHA" "$(baseline_header_field "$BASE9" head)"
+: > "$LOG9"
+: > "$TRACK9"
+RECON94=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+assert_json_field "gbv2-9.4: reconcile-tracker still SUCCEEDS (fail-closed narrows the baseline; it does not refuse the gate)" \
+    "$RECON94" '.ok' "true"
+assert_eq "gbv2-9.4: FAIL CLOSED — h.ts is no longer trusted as pre-existing and enters the tracker" "1" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.4: ...and the degrade is LOGGED, not silent" \
+    "could not diff the baseline's recorded head" "$(cat "$LOG9" 2>/dev/null || echo '')"
+
+# ---------------------------------------------------------------------------
+# 9.5 CASE 4a — the baseline file has NO head= line at all (hand-built,
+# corrupted, or a fixture predating 3mg.1's header). FAIL CLOSED the same way:
+# nothing in it is trusted, without needing git at all to make that call.
+printf '# gate-baseline v1\ncaptured_at=2020-01-01T00:00:00Z\ncaptured_by=test-harness\n--\n%s\n' \
+    "$H_LINE" > "$BASE9"
+assert_eq "gbv2-9.5: precondition — the hand-built baseline carries no head= line" "0" \
+    "$(grep -c '^head=' "$BASE9" | tr -d '[:space:]')"
+assert_eq "gbv2-9.5: precondition — ...but DOES carry h.ts's entry" "1" \
+    "$(baseline_body "$BASE9" | grep -c 'src/h\.ts' | tr -d '[:space:]')"
+: > "$LOG9"
+: > "$TRACK9"
+RECON95=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+assert_json_field "gbv2-9.5: reconcile-tracker still succeeds" "$RECON95" '.ok' "true"
+assert_eq "gbv2-9.5: FAIL CLOSED — h.ts is not trusted without a head= binding and enters the tracker" "1" \
+    "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+assert_contains "gbv2-9.5: ...and the degrade is logged" \
+    "no parseable head= line" "$(cat "$LOG9" 2>/dev/null || echo '')"
+
+# ---------------------------------------------------------------------------
+# 9M META: strip the GATE-BASELINE-HEAD-BIND region — the CALL SITE only, per
+# the sentinel's own header note, so this is the surgical "what if the reader
+# never consulted head-binding" mutation rather than also deleting
+# gate_baseline_bind_to_head's definition.
+#
+# THE GUARD FIRST (QA finding R4-F4, the same discipline §7M/§7R/§7SM already
+# apply): a strip that matched nothing leaves the copy byte-identical, and
+# every leg below would then measure the SHIPPED script while reporting on a
+# "mutant" — a green run that proves nothing.
+strip_head_bind_region() {
+    # strip_head_bind_region <src> <dst>. Anchored `^ *#` for the same reason
+    # every other strip in this file is: unanchored, a future prose line
+    # naming the sentinel mid-sentence would start the excision early.
+    awk '
+        /^ *# GATE-BASELINE-HEAD-BIND BEGIN/ { skip = 1; next }
+        /^ *# GATE-BASELINE-HEAD-BIND END/   { skip = 0; next }
+        !skip { print }
+    ' "$1" > "$2"
+}
+QG9_REAL=$(readlink "$QG9" || printf '%s' "$QG9")
+QG9_NOBIND="$F9/.claude/scripts/qa-gate-nobind.sh"
+strip_head_bind_region "$QG9_REAL" "$QG9_NOBIND"
+chmod +x "$QG9_NOBIND"
+if assert_mutant_applied "gbv2-9M META" "$QG9_REAL" "$QG9_NOBIND"; then
+    assert_eq "gbv2-9M META: the strip removed lines (non-vacuous)" "smaller" \
+        "$([ "$(grep -c . "$QG9_NOBIND")" -lt "$(grep -c . "$QG9_REAL")" ] && echo smaller || echo same)"
+    assert_eq "gbv2-9M META: gate_baseline_bind_to_head's CALL is gone from the copy" "0" \
+        "$(grep -c -F 'gate_baseline_bind_to_head "$_gbe_body"' "$QG9_NOBIND" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: ...while its DEFINITION survives (only the call site was targeted)" "1" \
+        "$(grep -c -F 'gate_baseline_bind_to_head() {' "$QG9_NOBIND" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: the copy still parses as bash" "0" \
+        "$(bash -n "$QG9_NOBIND" 2>/dev/null && echo 0 || echo 1)"
+
+    # Reset to EXACTLY the 9.3 preconditions: baseline at H0 (both g and h),
+    # current HEAD at H1, g.ts wave-2-dirty, h.ts still wave-1-dirty.
+    cp "$F9/.claude/.qa-tracking/gate-baseline.9-snapshot" "$BASE9"
+    : > "$TRACK9"
+    assert_eq "gbv2-9M META: precondition — g.ts is still dirty going into the mutant run" "1" \
+        "$(dirt_lines "$F9" | grep -c 'src/g\.ts' | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: precondition — the baseline is back to naming H0" \
+        "$H0" "$(baseline_header_field "$BASE9" head)"
+
+    RECON9M=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9_NOBIND" reconcile-tracker 2>&1 | tail -1)
+    assert_json_field "gbv2-9M META: the mutant still reconciles successfully" "$RECON9M" '.ok' "true"
+    assert_eq "gbv2-9M META: THE BUG REPRODUCES — without head-binding, g.ts (committed, re-dirtied) is WRONGLY subtracted again (9.3 WOULD fail)" "0" \
+        "$(grep -c -x -F "$F9/src/g.ts" "$TRACK9" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: ...and h.ts stays out too (the mutant is still a faithful reconciler otherwise)" "0" \
+        "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+
+    # RESTORE CONTROL: identical state, shipped script, g.ts comes back.
+    : > "$TRACK9"
+    RECON9C=$(CLAUDE_PROJECT_DIR="$F9" bash "$QG9" reconcile-tracker 2>&1 | tail -1)
+    assert_eq "gbv2-9M META: restore control — the shipped script reconciles g.ts back in" "1" \
+        "$(grep -c -x -F "$F9/src/g.ts" "$TRACK9" | tr -d '[:space:]')"
+    assert_eq "gbv2-9M META: restore control — and h.ts is still correctly excluded" "0" \
+        "$(grep -c -x -F "$F9/src/h.ts" "$TRACK9" | tr -d '[:space:]')"
+fi
+rm -f "$F9/.claude/.qa-tracking/gate-baseline.9-snapshot"
 
 [ "$FAIL" -eq 0 ]

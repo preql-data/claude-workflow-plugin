@@ -260,6 +260,9 @@ bd update $TASK --notes "COMPLETED: JWT auth endpoints"
 bash .claude/scripts/qa-gate.sh enter $TASK
 bash .claude/scripts/qa-gate.sh approve $TASK 'Verified: login, logout, token refresh'
 
-# 7. Beads task closes when Stop hook clears (verify-before-stop.sh handles
-#    the bd update --status closed call).
+# 7. The Stop hook releases — and does NOT close the task (qzv). An approval
+#    binds a CHANGE SET; closing is a claim about the TASK's work, which only
+#    the caller knows. The released envelope names the command; run it when the
+#    task really is done, and leave the task open when more change sets remain.
+bd close $TASK --reason '<what shipped>'
 ```

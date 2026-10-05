@@ -1,0 +1,35 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-a13r",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "068d559689b716d7bf137a786dac0d43904e3141fa2a73c8b53b4c90b1910a4b",
+  "risk_threshold": "high",
+  "stop_condition": "All four packet questions were independently adjudicated: the paired 6.3-META counts were tested against empty, overlong and semantically bypassed scopes; their relationship to the other source and live behavioural legs was traced; the coverage lost from the whole-file grep was classified; and 3.1c's two extraction pipelines were tested for empty and partial shared-filter failures.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R5-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/model-roles.test.sh:387-397",
+      "evidence": "The current mirror is correct: independent read-only extraction found both operands non-empty, five selected arms on each side, and byte equality. Both operands becoming wholly empty cannot pass because the two explicit preconditions fail. However, the shared `grep -E '^        [a-z_]+\\)'` can omit a non-empty subset symmetrically. A stream-only probe reindented the `designer)` arm on both sides, changed only `_expected_members()`'s omitted designer payload to `WRONG`, and the shipped 3.1c selection logic still reported role_nonempty=yes, expected_nonempty=yes, identical=yes over the remaining four lines. A split arm is another hole: the selector captures an eight-space `designer)` pattern line but not a `printf` payload moved onto the following line. Thus `all)` is excluded symmetrically and `*)` is excluded by the positive selector as claimed, but the test does not enforce that every member arm was selected or that each selected line contains the payload.",
+      "description": "The absolute claim that 3.1c guards every member-list mirror is false. It guards the five current convention-shaped lines and catches ordinary one-sided edits, but a shared formatting change can silently remove one role from the oracle and leave that payload available for later unchecked drift—the same common-filter weakness described by the repository's mirror lesson. Add an independent role-key completeness check derived from ALL_ROLES/CONCRETE_ROLES and require one complete printf-bearing arm per role before comparing bytes."
+    },
+    {
+      "id": "R5-F2",
+      "severity": "low",
+      "location": ".claude/scripts/tests/model-roles.test.sh:710-785",
+      "evidence": "For the current source, the full-line awk anchor occurs exactly once, at model-select.sh:1040, while the `_expected_members()` line at :1940 does not match it. Independently reproduced stream counts were unmutated scoped=1, mutant scoped=0, whole mutant=1, exact anchor count=1. Strictly textually, if MUT6 were identical to MS the same deterministic extraction could not produce 1 and 0; awk exit 7 and cmp also reject that case. Function/opener renames and target-line reformatting fail the positive/awk legs. But the pair is not a semantic proof of its assertion name. In a stream-only single-edit probe, I inserted a differently spaced fallback `designer) printf ...` arm after the exact arm. The two scoped counts remained 1 and 0 after the exact awk strip, and evaluating the transformed mutant's `_role_agent_file designer` still returned `/designer.md`. The four other listed source legs—awk success, mutant differs, mutant parses, constant survives—also do not exclude that shape. The later live assertion that the designer lane remains unwritten does exclude it. Separately, reformatting only `_role_agent_file()`'s closing brace made both scoped counts remain 1/0 because sed continued to the next bare brace, disproving the new comment's claim that such a closer change yields nothing and that the control reddens on every extraction break.",
+      "description": "The positive control closes the specific empty-range vacuity and is load-bearing for interpreting the adjacent zero-count assertion, but the pair proves only that matching source text disappeared from the selected range. The full 6.3 META remains non-vacuous because its live mutant misbehaviour and shipped restore control supply the semantic proof. The comments/assertion name should describe source-shape removal, not claim that the pair alone proves designer no longer resolves."
+    },
+    {
+      "id": "R5-F3",
+      "severity": "info",
+      "location": ".claude/scripts/tests/model-roles.test.sh:703-785; execution environment",
+      "evidence": "Scoping discards the old whole-file assertion that no line of the generic `designer)        printf` shape exists anywhere. That was not a valid resolver invariant: `_expected_members()` now legitimately contains such a line, and another case statement elsewhere need not affect `_role_agent_file()`. Resolver behaviour is covered directly by 6.1, 6.2, the live 6.3 mutant/restore pair, and the Section 12 executions; 12M is not itself a structural uniqueness guard. Therefore no required duplicate-arm coverage was lost—only an accidental, now-false global formatting constraint. Execution limit: the full suite was attempted, but `mktemp` failed with `Operation not permitted` in the read-only sandbox and the cascading 125/307 output is invalid, so no suite pass/fail figure from that attempt is claimed. The packet's 433/0 clean and 432/1 mutated figures remain orchestrator-measured, not independently re-executed. I independently produced only the read-only stream measurements stated above. The reviewed_hash was produced with an in-memory equivalent of the readable tracker/denylist canonicalization because the canonical `--hash-only` command also requires mktemp. The known 14-fixture tracker omission filed as claude-workflow-plugin-1c82 was not reviewed."
+    }
+  ],
+  "iterations": 5,
+  "stopped_by": "stop_condition"
+}

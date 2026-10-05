@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-j4pe",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "d0e0d3bfd7e134b024dec32edf7e6810a3941eb35fd1372995f71ec9d6d8ddec",
+  "risk_threshold": "high",
+  "stop_condition": "Round 1 checked the complete compute_design_satisfied call-site census (approve, internal one-hop recursion, design-gate-precheck, design-conform, design-status, compute_design_conflict_open, and compute_design_coherence), the recursion boundary and VIA_BINDING applicability semantics, the declared/actual denylist algebra, the new dependency-refusal path, the modified guard-1 mutation control, the coherence residual, and the disclosed absence of a bound-and-satisfied full approve integration. One hop is correct for the intended D4 graph, and coherence correctly treats VIA_BINDING as not applicable because an own DESIGN-ARTIFACT wins before fallback; however, one hop is not a system-wide structural guarantee when callers re-enter the predicate. Algebraically, with actual A disjoint from denylist D and filtered declared C'=C\\D, A\\C=A\\C', so the undeclared gate is inert. The pre-existing coherence denylist residual is separable and deferral is defensible for this change, although I could not verify the asserted 7kng tracker record because bd could not open its lock/database and the exported ledger did not contain that id. Execution limits: mktemp -d failed rc=1 with Operation not permitted, so I did not execute the suites, make lint, or a full approve fixture; all packet suite/assertion figures remain orchestrator- or implementer-measured. I independently ran bash -n on the five changed/new shell files at HEAD ea8031d plus the uncommitted change set (rc=0), reproduced the current reviewed_hash in memory from the readable tracker using the shared denylist/sort/hash pipeline, and ran a no-write exact-pipeline probe of the undefined workflow_denylisted case.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/qa-gate.sh:12936-12953 and :14465-14474 (with cmd_design_unit_bind at :12157-12667)",
+      "evidence": "The call-site census found two more ownership-assuming consumers. cmd_design_conform resolves child C's binding to design_task A, then calls compute_design_satisfied(A); if A has no own DESIGN-ARTIFACT but is itself bound to satisfied B, the call returns true with DESIGN_SATISFIED_SOURCE_TID=B and VIA_BINDING=true, yet the caller snapshots B's DESIGN_VERDICT_HASH and validates/hashes docs/specs/A.md. compute_design_conflict_open has the sharper mismatch: after resolving subject=A it calls compute_design_satisfied(A), ignores VIA_BINDING, then derives disputed-unit content from A's artifact, so a satisfied review of B can participate in clearing a conflict against A. The writer does not prohibit this graph: design-unit-bind validates the target file/unit but does not require the target's own DESIGN-ARTIFACT record and does not reject a target that itself carries a binding. Thus C->A and A->B are command-reachable. The internal flag at :11603 stops C's single call from recursively following A->B, but these fresh top-level calls on A follow it anyway.",
+      "description": "The stated one-hop structural guarantee is only local to one predicate invocation. design-conform and compute_design_conflict_open re-enter the predicate after separately following a binding and then conflate 'A's design is satisfied via B' with 'A itself owns the satisfied artifact'. This is the same applicability bug fixed in coherence, and the conflict-clearing path can use an unrelated task's satisfied review to clear A's conflict. Require an own-source answer (SOURCE_TID equals the argument and VIA_BINDING is false), or add an explicit own-design mode, in every caller that subsequently reads the argument's artifact."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": ".claude/scripts/tests/design-satisfied-unit-binding.test.sh:268-402 and .claude/scripts/tests/run-tests.sh",
+      "evidence": "The new test executes design-status for the bound child and design-coherence for that child, including separate mutants, but contains no approve invocation. The packet explicitly says no synthetic bound-and-satisfied full approve end-to-end was run. Source tracing shows approve composes the new satisfaction result with conflict, alignment/design-conform, coherence, and rollup in one call; separately proving only the first and coherence predicates does not execute those intervening ownership-sensitive consumers, including the R1-F1 sites.",
+      "description": "For a P1 whose root cause is two mechanisms never having been run together, omitting the real operator path repeats the failed assurance pattern. Add a synthetic bound-and-satisfied child that satisfies the other approval prerequisites and assert full approve succeeds; include a control/mutant that proves the test reaches the design-satisfied and coherence guards rather than bypassing them."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:13067-13093 (workflow_denylist_unavailable and declared filtering)",
+      "evidence": "Availability is tested only by WORKFLOW_DENYLIST_REGEX being non-empty. If that variable is inherited/preseeded while workflow_denylisted is undefined, the project-root re-source is skipped and the named refusal does not fire. I ran the exact filtering pipeline in memory with the variable set and the function unset: Bash printed two 'workflow_denylisted: command not found' diagnostics, but the substitution returned rc=0, produced a valid array of length 2, and retained the denylisted fixture path. The subsequent rc/shape guard therefore also accepts it.",
+      "description": "The new fail-closed dependency path can go silent and recreate 1c82's unfiltered declared set. Check the function itself (for example, declare -F workflow_denylisted) before deciding the dependency is loaded, re-source when either half of the library contract is absent, and refuse if either remains absent. Add a direct unavailable-function test."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/design-accessors.test.sh:556-602 (Section 6)",
+      "evidence": "Section 6 formerly removed only DESIGN-SOURCE-UNREADABLE and behaviorally killed guard 1. It now removes guard 1 and the new binding-source guard together. With guard 3 intact, T-NOFIXTURE masks a broken/missing guard 1 because every read fails and guard 3 returns the same refusal; the joint mutant therefore cannot distinguish guard 1 working from guard 1 being semantically dead. The new test independently isolates guard 3 with a second-read failure, but no test now isolates guard 1's first-read failure.",
+      "description": "This is a weakened mutation control, not an equivalent adaptation. Preserve an isolated guard-1 mutant using a fixture where the artifact read fails but the subsequent binding read would succeed/heal, or otherwise suppress only fallback while mutating guard 1. Keep the separate second-read fixture for guard 3."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:12020 and :12147-12149 (cmd_design_gate_precheck)",
+      "evidence": "cmd_design_gate_precheck calls compute_design_satisfied(tid) and is safe on a true result because it asks whether the task's governing design is ready, not whether tid owns it. On a bound child whose governing design is unsatisfied, however, SOURCE_TID names the design task while the refusal still tells the operator to run design-review-record against $tid. approve's analogous remediation was updated to SOURCE_TID; this call site was not.",
+      "description": "The call-site census found a source-localization regression even where there is no applicability bug. A bound child's pre-delegation refusal directs the review record to a task that structurally does not own the artifact. Use DESIGN_SATISFIED_SOURCE_TID in the remediation command and cover the bound-unsatisfied precheck path."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

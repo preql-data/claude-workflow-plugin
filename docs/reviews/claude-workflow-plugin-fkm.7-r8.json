@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.7",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "a052b82047ef8bb953811e4e90dea23dbd1687ce8666add0d2b1b90ec6cdda8d",
+  "risk_threshold": "high",
+  "stop_condition": "Every R7 finding (F1-F5) is verified fixed against independently reproduced evidence rather than report; the new LEG-3 green-check corroboration and ref-containment code is proven non-vacuous in BOTH directions (refuses an uncorroborated claim, clears a corroborated one) with its fail-closed behaviour assessed for host dependence; and no critical/high finding remains in the alignment or approve-refusal paths.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R8-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:13906-13924 (LEG-3-GREEN-CHECK-CORROBORATION) vs the region's residual enumeration at 13471-13503",
+      "evidence": "MEASURED: `grep -n 'GREEN-CHECK' .claude/scripts/qa-gate.sh` shows the writer at :14743 stamps `at $ts` into the record and NO consumer anywhere reads it; latest_green_check_result (:2754-2772) captures only phase and result. Nothing binds the record to a change_set_hash -- contrast the impact report, which approve REFUSES when its hash no longer matches. cmd_green_check gates only `--phase before` + red + bound (:14745); `--phase after` has no precondition tying it to work state. So a `phase=after result=green` record written before later edits fully corroborates a payload describing the later state. The region enumerates two residuals explicitly (grep shallowness 13471-13482; symlink last-component 13621-13632) and does not name this one.",
+      "description": "Not a false statement -- the region header, the help text at :3786 and docs/AGENTS.md all claim existence-and-agreement, and that is exactly what the code delivers. The finding is that the corroboration is EXISTENCE + AGREEMENT and never RECENCY, in a leg whose entire purpose is corroboration, and that the one paragraph written to enumerate this leg's residuals omits it. An enumeration that omits a residual is weaker evidence than no enumeration, which is the same disclosure standard R7-F4 was judged against. MITIGATING CONTROL, named rather than assumed: verify-before-stop.sh independently runs the FULL suite on every Stop iteration, so a genuinely red tree is refused by the gate regardless of this leg -- which is why this is below threshold. Remedy if a future round wants it closed: bind the record to the change_set_hash the way the impact report already is, or name the gap in the residual paragraph."
+    },
+    {
+      "id": "R8-F2",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:13500 (region summary) and :3786 (help text), plus docs/AGENTS.md 'Per-unit alignment (v5 D5 piece 4)'",
+      "evidence": "MEASURED in an isolated fixture, driving design_alignment_ref_is_contained EXTRACTED VERBATIM from the shipped script (awk range extract, not retyped), PROJECT_DIR=$F: `$F/evildir -> /etc` with ref `evildir/passwd` -> REFUSED (this is the fix's core value: `cd -P` really does resolve a symlinked DIRECTORY physically, where a lexical check would have passed it); `$F/evilfile -> /etc/passwd` -> CONTAINED, i.e. NOT refused, so the subsequent `grep -qF -- root $F/evilfile` reads bytes outside the tree. Also measured: `/etc/passwd` REFUSED (my own R7-F4 counterexample, now closed), `$F/../../../../etc/passwd` REFUSED, `` and `/` REFUSED (fail-closed), `$F/nested/deep/real.sh` CONTAINED (legitimate depth still allowed).",
+      "description": "Three summary surfaces say the ref names 'a file inside the project tree'; the mechanism checks the file's PARENT DIRECTORY only, so a symlinked FILE inside the tree whose target is outside still passes. The gap IS disclosed precisely -- design_alignment_ref_is_contained's own header (13621-13632) says so in terms ('SCOPE, DISCLOSED RATHER THAN SILENTLY ASSUMED... checks the FILE'S PARENT DIRECTORY only') and the region header's own sentence says 'PARENT DIRECTORY' two lines before the loose summary. What makes this a finding rather than nothing is that the loose phrasing now sits on THREE surfaces while the precise statement sits on one -- the instances-versus-class shape LESSONS.md:282 records. Practical risk stays low: exploiting it needs a symlink committed into the tree (a visible change in the specialist's own diff) plus the absurd ref named twice, which is the same 'not a privilege boundary' reasoning R7-F4 itself gave."
+    },
+    {
+      "id": "R8-F3",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:2760-2771 (latest_green_check_result) vs its own header at :2702-2706",
+      "evidence": "The reader ends `printf '%s' \"$comments_json\" | jq -r --arg phase \"$phase\" '...' 2>/dev/null || true` followed by `return 0`. A nonzero jq exit is therefore swallowed and produces rc 0 with empty stdout -- which this function's own header declares to be 'a PROVEN absence -- the comment stream WAS retrieved and no matching record is in it', and which the caller at :13914 maps to criteria_tests_green_check_unrecorded ('was never actually run'), NOT to green_check_record_unreadable. Its own strict sibling design_comments_json (:2242-2254) captures out_rc and returns 3 on exactly this condition.",
+      "description": "Near-unreachable and fails CLOSED: design_comments_json has already jq-validated the array before this runs, so the second jq operates on proven-valid JSON, and BOTH branches refuse approve anyway. The xsu1 harm the header invokes -- an unread stream mapping to a PERMISSIVE downstream answer -- does not apply here, because the permissive reading does not exist on this path. Recorded for two reasons only: the header states an absolute ('PROVEN absence') that has a narrow counterexample, and the same file's own sibling already captures the rc, so the strict idiom was available and not used. Comment-accuracy class, the same as R7-F5."
+    },
+    {
+      "id": "R8-F4",
+      "severity": "medium",
+      "location": "claude-workflow-plugin-fkm.7 task record (COMPLETION v1 stream) and .claude/.qa-tracking/completion-claude-workflow-plugin-fkm.7-devops.json",
+      "evidence": "MEASURED via anchored record grammar over the task's comment stream: roles in order are backend, then seven devops/qa pairs. The LAST implementer (devops) record is `at 2026-09-14T10:46:50Z: 37 file(s), 5 test(s)`; the next record is my own r7 qa record at 11:24:27Z. EVERY fix-round edit post-dates both (mtimes, UTC): rubrics/default.md 11:40:56, grader.md 11:41:34, review-check.sh 11:42:05, docs/AGENTS.md 11:44:16, qa-gate.sh 11:46:28, design-unit-align.test.sh 11:51:33, the 21 e2e fixture mirrors 12:02:49-50. No devops record exists after 10:46:50Z; each of the seven prior rounds recorded one.",
+      "description": "The WITNESS function survives, and I measured that rather than assuming it: the on-disk payload digests to b959f796677e9d1f3b2a0d735617dad7674895f835d1275ab39f2d89f60a3b00, byte-identical to what the record binds, and every fix-round path is already inside its declared files_changed (all six source files plus all three new specs). What is missing is the NARRATIVE: tests_added still reads 5 entries, written before the ~20 new R7-F3/R7-F4 assertions existed, and no decisions/llm_observations entry describes the round-7 fixes or why the stronger F3 fix was chosen over a text correction. Non-blocking ONLY because the witness happens to be complete -- had this fix round added a new file, the declared set would have been short, and for an unbound task nothing would have caught it (design-conform's undeclared-files check needs a unit binding). Remedy: record a fresh implementer contract per fix round, as rounds 1-7 did."
+    }
+  ],
+  "iterations": 8,
+  "stopped_by": "stop_condition"
+}

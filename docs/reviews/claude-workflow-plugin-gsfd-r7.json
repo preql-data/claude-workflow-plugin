@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-gsfd",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "dddcaa03eaecfc4e8dee2ec58f98a1ff52e038420893339eeedd9d222933373e",
+  "risk_threshold": "high",
+  "stop_condition": "all five R6 findings verified genuinely closed in the current tree (code + tests + docs read directly, not from the fix report), the two red L2 assertions proven pre-existing at base f9f6f8f via an independent detached-worktree reproduction, and no finding at/above high remaining in the concurrency-ownership surfaces (verify-before-stop.sh, qa-gate.sh, both runners, tree-lease.sh)",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R7-F1",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2635 (assertion 15.9) and poll_for_dolt_flusher (observation windows)",
+      "evidence": "The gate iteration ending 2026-08-20T17:13:55Z ran the L1 suite against this exact change-set hash and FAILED exactly one assertion: 15.9 expected seen / actual not-seen (last-test-tail.claude-workflow-plugin-gsfd + last-test-output.log:4181). The identical bytes pass serially: the orchestrator measured 47/47 @ 4131 assertions; my own serial rerun of the spec returned rc=0, 338/338 in 308s; and three back-to-back fresh-store probes using the extracted poll_for_dolt_flusher all returned seen in ~2s each with no cooldown. So dolt spawns deterministically when idle; the 00:13 red is a load/contention miss by the probe -- the same disclosed blind-spot family (poll gap, wait-window) the R6-F3 comment names, in the false-RED direction for 15.9, plausibly abetted by a concurrent flusher fast-exiting on the shared ~/.dolt/eventsData lock (dir mtime moved at exactly 00:13).",
+      "description": "An intermittent false-red of a positive control inside the L1 suite the Stop gate runs for EVERY task: when it fires, an unrelated task pays a wasted gate iteration. Direction is fail-closed (never certifies anything false), the batch strictly improved this probe (store-scoped attribution replaced the host-wide guess), and closing the windows needs event-based observation the operator-directed collapse put out of scope -- so this is accept-and-file, not a fix round: a bounded retry of the POSITIVE probe only (retry on not-seen; never the 15.10 negative control) would multiplicatively shrink the false-red rate without weakening either control. Follow-up task filed."
+    },
+    {
+      "id": "R7-F2",
+      "severity": "low",
+      "location": "CHANGELOG.md (gsfd entry, round-6 narrative paragraph: leaving 71 assertions, all passing, as measured ... at this change set)",
+      "evidence": "bash .claude/scripts/tests/tree-lease.test.sh at this change set prints PASSED: 78 assertion(s) (measured during this review, rc=0 in 16s). The entry own R6-F4 paragraph a few lines above correctly says 78 assertions total, this change set.",
+      "description": "A stale measured number still bound to the phrase at this change set after fix round 7 added the 7 R6-F4 assertions -- the exact prose-drift class the batch own LESSONS entry records. One-line correction; contradicted within the same entry, so a reader can recover the true number, hence low."
+    }
+  ],
+  "iterations": 7,
+  "stopped_by": "verdict"
+}

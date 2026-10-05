@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-rqer",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "e5f7d831660f2344cdff4289e0ddf30a821caf8613dd5db257fa44356bad804f",
+  "risk_threshold": "high",
+  "stop_condition": "every AC of the corrected rqer fix spec (AC-1..AC-6) is traced to a passing paired check, and no high-severity finding remains in the review-artifact write/record/approve path",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "low",
+      "location": ".claude/scripts/codex-review.sh:475",
+      "evidence": "Measured (QA round-2 probe, isolated fixture + stub server): shipped driver with a directory pre-placed at the derived path exits 5 with EMPTY stderr in every refusal arm; an otherwise-identical copy with only the teardown exec's 2>/dev/null removed emits the full DIR-SHAPE refusal text. The command-less `exec 3>&- 2>/dev/null` permanently reassigns the script's own fd 2, so every fail_no_artifact message after teardown is unobservable to any external caller. Present at base 9488c69 (lines 259 and 475), not introduced by this change set.",
+      "description": "Correct-but-mute guards: exit codes and side effects (no artifact, no littering) are right and tested; only post-teardown diagnostic text is lost. Disclosed by the fix round in its completion record and in C10's own comment, which deliberately asserts only what is observable. Acceptable to ship this round: pre-existing, decision-path-neutral (exit 5 still degrades the lane correctly), and now tracked with mechanism + evidence on claude-workflow-plugin-fkm.1.14 (same diagnostics-loss family). Non-blocking at risk_threshold=high."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:4933",
+      "evidence": "R1-F5 carried forward unchanged, per QA's own round-1 deferral (the fix round explicitly left it): cmd_review_record --file in the repo-relative spelling reads bytes via `cat -- <relative>` (CWD-relative) for validation and grammar extraction while hashing the absolute derived path; with CWD != PROJECT_DIR and different files at both spellings the validated and hashed bytes diverge.",
+      "description": "Self-inflicted-only edge, no privilege boundary. Follow-up task filed this round: claude-workflow-plugin-e1ep (discovered-from claude-workflow-plugin-rqer). Non-blocking at risk_threshold=high."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

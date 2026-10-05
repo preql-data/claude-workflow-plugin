@@ -168,7 +168,7 @@ has_label_of() {
 
 # rubric_records <root> <tid> — every RUBRIC comment, one per line.
 rubric_records() {
-    bdq "$1" show "$2" --json 2>/dev/null \
+    bd_show_with_comments "$2" "$1" \
         | jq -r '(if type=="array" then .[0].comments else .comments end) // [] | .[].text' 2>/dev/null \
         | grep '^RUBRIC ' || true
 }
@@ -385,7 +385,23 @@ assert_eq "rubric-bind-C0: precondition — and closed the cycle" \
 
 # Restore EXACTLY the change set that was graded (approve truncates the
 # tracker), so the hash test would pass and only the cycle test can fire.
-seed_tracker "$FC" "src/c.ts"
+# claude-workflow-plugin-rqer (v5 D2): "exactly the change set that was
+# graded" now includes docs/reviews/$TID_C-r1.json too — armed_cycle's
+# seed_review_records reconciled it in before HASH_C (above) was captured,
+# so leaving it out here would make this restoration NOT byte-identical to
+# what HASH_C actually named, for a reason having nothing to do with the
+# cycle invariant this section tests.
+# claude-workflow-plugin-fkm.4 (v5 D2): the SAME reasoning names a second,
+# newer path — docs/specs/$TID_C.md, the design doc armed_cycle's
+# seed_review_records ALSO reconciled in (via seed_design_verdict) before
+# HASH_C was captured. Unlike denylist-shared.sh's C4/C5/C6 (a LATER
+# restore on a task already carrying a design doc from an EARLIER approve,
+# where the doc is correctly excluded as already-baselined, unchanged
+# dirt), this is TID_C's only cycle to date: HASH_C was captured before
+# ANY approve ran, so no baseline yet exists to have subtracted it, and
+# both docs/reviews' and docs/specs' first appearance are genuine
+# reconcile survivors either way.
+seed_tracker "$FC" "src/c.ts" "$FC/docs/reviews/$TID_C-r1.json" "$FC/docs/specs/$TID_C.md"
 HASH_C_NOW=$(ir "$FC" --hash-only 2>/dev/null || echo "")
 assert_eq "rubric-bind-C1: precondition — the change set is byte-identical to the graded one" \
     "same" "$([ "$HASH_C" = "$HASH_C_NOW" ] && echo same || echo differs)"
@@ -522,7 +538,7 @@ assert_eq "rubric-bind-F1: ...and it reads back the hash the writer just wrote" 
 F_QA_SELECTOR=$(grep -o 'test("\^RUBRIC [^"]*")' "$QA_MD" | head -1)
 assert_eq "rubric-bind-F2: qa.md 6c carries a RUBRIC selector" \
     "yes" "$([ -n "$F_QA_SELECTOR" ] && echo yes || echo no)"
-F2_MATCHED=$(bdq "$FF" show "$TID_F" --json 2>/dev/null \
+F2_MATCHED=$(bd_show_with_comments "$TID_F" "$FF" \
     | jq -r "[(if type==\"array\" then .[0].comments else .comments end) // [] | .[] | select(.text | $F_QA_SELECTOR)] | length" 2>/dev/null || echo 0)
 assert_eq "rubric-bind-F2: THE DRIFT GUARD — qa.md's own selector still finds the new-grammar record" \
     "1" "$F2_MATCHED"
@@ -1117,6 +1133,14 @@ qg "$FL" enter "$TID_L1" >/dev/null 2>&1
 assert_eq "rubric-bind-L1: precondition — the verdict for set A is preserved" \
     "yes" "$(has_label_of "$FL" "$TID_L1" "rubric-satisfied")"
 seed_tracker "$FL" "src/l.ts" "src/l2.ts"
+# claude-workflow-plugin-rqer (v5 D2): this overwrite drops the review
+# artifact path the earlier `enter` (line above) had already reconciled in —
+# the artifact FILE is still real and uncommitted, so a reconcile (which,
+# unlike a bare `ir` regenerate, actually re-discovers git-visible dirt)
+# rediscovers it before the report is regenerated. B1's equivalent sequence
+# does this implicitly because ITS seed_tracker precedes its own `enter`
+# call; here `enter` already ran, so it is done explicitly.
+qg "$FL" reconcile-tracker >/dev/null 2>&1
 ir "$FL" "$TID_L1" >/dev/null 2>&1
 L_APPROVED=$(ir "$FL" --hash-only 2>/dev/null || echo "")
 assert_eq "rubric-bind-L1: precondition — the approval will bind a different set" \
@@ -1132,7 +1156,7 @@ assert_contains "rubric-bind-L1: ...naming both hashes" \
     "graded=$L_GRADED, approved=$L_APPROVED" "$L1_OUT"
 assert_contains "rubric-bind-L1: ...and the DURABLE approval record carries the mismatch" \
     "[rubric mismatch: graded=$L_GRADED approved=$L_APPROVED]" \
-    "$(bdq "$FL" show "$TID_L1" --json 2>/dev/null | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' | grep '^QA-GATE APPROVED ' | tail -1)"
+    "$(bd_show_with_comments "$TID_L1" "$FL" | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' | grep '^QA-GATE APPROVED ' | tail -1)"
 
 # L2. THE MATCHING CASE: the claim is now positive evidence, not a label read.
 TID_L2=$(new_task "$FL" "bjx: verdict verified against the approval")
@@ -1143,7 +1167,7 @@ L2_OUT=$(qg "$FL" approve "$TID_L2" "Rubric v1 satisfied at iteration 1." 2>&1 |
 assert_contains "rubric-bind-L2: a matching verdict is reported as VERIFIED, not merely preserved" \
     "VERIFIED against this approval" "$L2_OUT"
 assert_not_contains "rubric-bind-L2: ...with no mismatch token in the record" \
-    "rubric mismatch" "$(bdq "$FL" show "$TID_L2" --json 2>/dev/null | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' | grep '^QA-GATE APPROVED ' | tail -1)"
+    "rubric mismatch" "$(bd_show_with_comments "$TID_L2" "$FL" | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' | grep '^QA-GATE APPROVED ' | tail -1)"
 
 # L3. THE NON-REFUSAL, pinned. The documented override path (qa.md 6f) has to
 # keep working: approving with an unbound or absent verdict must not be blocked,
@@ -1158,4 +1182,4 @@ assert_json_field "rubric-bind-L3: an UNBOUND verdict does not block the approva
 assert_contains "rubric-bind-L3: ...and approve says it could not be checked rather than claiming it was" \
     "could not be checked against this approval" "$L3_OUT"
 assert_not_contains "rubric-bind-L3: ...and records no mismatch it cannot substantiate" \
-    "rubric mismatch" "$(bdq "$FL" show "$TID_L3" --json 2>/dev/null | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' | grep '^QA-GATE APPROVED ' | tail -1)"
+    "rubric mismatch" "$(bd_show_with_comments "$TID_L3" "$FL" | jq -r '(if type=="array" then .[0].comments else .comments end)//[] | .[].text' | grep '^QA-GATE APPROVED ' | tail -1)"

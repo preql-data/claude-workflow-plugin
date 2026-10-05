@@ -6,17 +6,41 @@ Complete documentation of all AI agent prompts in the claude-workflow plugin.
 
 ## Overview
 
-The plugin includes 7 agents:
+The plugin includes 9 agents:
 
 | Agent | Role | File |
 |-------|------|------|
 | **Orchestrator** | Central coordinator | `agents/orchestrator.md` |
+| **Designer** | Produces the design artifact — problem framing, testable acceptance criteria, and the decomposition into independently buildable units. Writes no implementation code (v5.0.0 Phase D1) | `agents/designer.md` |
+| **Design reviewer** | Separate-context reviewer of the design artifact, scored against `.claude/rubrics/design.md`. Spawned by the root orchestrator — the designer cannot spawn its own reviewer — and must resolve to an identity distinct from the designer (v5.0.0 Phase D2 — the record grammar, subcommand, and gate enforcement that bind its verdict shipped alongside it) | `agents/design-reviewer.md` |
 | **Backend** | API/DB specialist | `agents/backend.md` |
 | **Frontend** | UI/UX specialist | `agents/frontend.md` |
 | **DevOps** | CI/CD specialist | `agents/devops.md` |
 | **QA** | Quality gate | `agents/qa.md` |
 | **Grader** | Separate-context rubric scorer (spawned by the root orchestrator at QA's request — subagents cannot spawn subagents per the Claude Code docs, so the spawn is relayed) | `agents/grader.md` |
 | **Judge** | Separate-context mutation classifier (spawned by the root orchestrator from the C.1 mutation-sweep packet — subagents cannot spawn subagents, so the harness writes a judge-packet to disk and the orchestrator relays it; classifies surviving mutants as `equivalent` or `genuine`) | `agents/judge.md` |
+
+### Model role classes
+
+The nine agents ride **five** role classes, mapped in `.claude/model-roles` and
+resolved at SessionStart by `model-select.sh`. A class is pinned to a
+*strategy*, never to a model version:
+
+| Class | Agents | Default strategy |
+|---|---|---|
+| `designer` | `designer` | `top` |
+| `design_reviewer` | `design-reviewer` | `top` |
+| `orchestrator` | `orchestrator` | `top` |
+| `implementer` | `backend`, `frontend`, `devops` | `sonnet-class` |
+| `reviewer` | `qa`, `grader`, `judge` | `top` |
+
+A strategy is `top` (the newest model in the most capable family available) or
+`<family>-class` (the newest `claude-<family>-*`). Two surfaces are **not**
+roles and own no agent files: `implementer_class_high`, the per-unit escalation
+strategy, and the two lane keys `reviewer_lane` / `design_reviewer_lane`, which
+decide *which* reviewer is engaged and never change a frontmatter pin. See the
+header of `.claude/model-roles` for the full grammar, the identity-collapse
+condition and its ONE real clearance (`design_reviewer=<family>-class`). Installing Codex is NOT a clearance — it clears the flag without changing which model reviews the design (`claude-workflow-plugin-yvpe`).
 
 ---
 
@@ -74,8 +98,10 @@ bd list --status in_progress # Currently active
 
 # Create hierarchical tasks (EPICS)
 bd create "Epic: Feature Name" -t epic -p 1 --description "..."
-bd create "Backend: API" -p 1 --parent $EPIC_ID -l backend,qa-pending
-bd create "Frontend: UI" -p 1 --parent $EPIC_ID -l frontend,qa-pending
+# --no-inherit-labels: bd copies the parent's labels onto a child, so without it
+# a task under an approved parent is born carrying qa-approved (rmz).
+bd create "Backend: API" -p 1 --parent $EPIC_ID -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: UI" -p 1 --parent $EPIC_ID -l frontend,qa-pending --no-inherit-labels
 
 # Claim and track
 bd update $ID --status in_progress
@@ -715,6 +741,8 @@ The gate is precision-only; recall is reported alongside but not gating. C.2's d
 │  • Writes tests for user behavior                               │
 │  • Approves OR blocks with feedback                             │
 │  • Updates labels: qa-pending → qa-approved                     │
+│  • May relay a rubric/mutation packet to a ROOT-spawned         │
+│    @grader / @judge first — qa cannot spawn them itself         │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -723,6 +751,28 @@ The gate is precision-only; recall is reported alongside but not gating. C.2's d
 │                    bd close $ID --reason "..."                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+This diagram is the classic single-task **domain flow**: it names 5 of
+the 9 agents (orchestrator, the three specialists, qa) because those are
+the ones a typical bug fix or small feature actually touches. Two things
+a 9-agent, v5-complete system adds around it, deliberately not redrawn
+above to keep the happy path readable:
+
+- **The design loop can precede it.** For design-bound work, `@designer`
+  produces the design artifact first; `@design-reviewer` — spawned from
+  the ROOT, never by the designer, since subagents cannot spawn
+  subagents — scores it against `.claude/rubrics/design.md` in a fresh
+  context, and only a satisfied design decomposes into the
+  `@backend`/`@frontend`/`@devops` tasks this diagram starts from. See
+  the per-agent list and the "Model role classes" section above, and
+  `docs/WORKFLOW.md`.
+- **`@grader` and `@judge` are root-relayed, not auto-routed.** QA
+  requests a rubric verdict or a mutation-survivor classification; the
+  ROOT conversation performs the actual spawn (`RUBRIC-RELAY` /
+  `JUDGE-RELAY`) and hands the verdict back, because a subagent — QA
+  included — cannot spawn one itself. An epic-typed task additionally
+  requires a coherent `DESIGN-ROLLUP` verdict, from a second
+  `@design-reviewer` spawn, before `qa-gate.sh approve` will close it.
 
 ---
 
@@ -884,7 +934,12 @@ how the orchestrator chains delegations without re-deriving context.
   ],
   "blockers": [],
   "llm_observations": "<free-form medium-length text>",
-  "context_coverage": "<free-form medium-length text>"
+  "context_coverage": "<free-form medium-length text>",
+  "unit_id": "<design unit id, or \"\" if this task is not bound to one>",
+  "design_hash": "<64-hex hash of the bound design artifact, or \"\" >",
+  "green_before": "green | red | none",
+  "green_after": "green | red | none",
+  "criteria_tests": {"<criterion-id>": ["<file>::<label>", "..."]}
 }
 ```
 
@@ -936,15 +991,181 @@ how the orchestrator chains delegations without re-deriving context.
   QA reads it to judge whether the specialist's confidence was earned;
   the rubric grader scores it under default criterion C8. **A completion
   payload without `context_coverage` is malformed.**
+- **`unit_id`** — **required**, string, MAY be empty. v5 D5 (green-to-green
+  per unit, claude-workflow-plugin-fkm.7). The design unit this task
+  implemented, read from `qa-gate.sh design-unit-show` — empty when the
+  task is not bound to a design unit at all, which is the ordinary case for
+  the overwhelming majority of tasks (the same shape as `blockers: []`
+  meaning "no blockers"). When non-empty it must match `[A-Za-z0-9._-]+`,
+  the same class `design-unit-show` and `design-unit-json` already enforce.
+- **`design_hash`** — **required**, string, MAY be empty. The 64-hex hash
+  of the design artifact this task's unit is bound under, read back from
+  `qa-gate.sh spec-injection-status` (recorded at spawn by subagent-start.sh's
+  spec injection). Empty is legal both when `unit_id` is empty AND — a
+  narrower, disclosed case — when `unit_id` is non-empty but spec injection
+  failed to record it (best-effort; see `record_spec_injection`'s own
+  header). The REVERSE is refused: a non-empty `design_hash` with an empty
+  `unit_id` is not a coherent claim (there is no unit for the hash to
+  describe) and is rejected as `design_hash_without_unit_id`.
+- **`green_before`** / **`green_after`** — **required**, string, one of
+  `green` | `red` | `none`. Whether the suite was green immediately before
+  starting the unit's implementation, and immediately after finishing it —
+  `qa-gate.sh green-check <task-id> --phase before|after` derives this from
+  an actual run of detect-stack.sh's resolved test command (no new runner)
+  and records it durably; the value here is copied from that command's own
+  `result` field, never invented. `none` means detect-stack.sh resolved no
+  test command at all (`runner: "none"`) — a real, distinct state, never
+  collapsed into a boolean (which would make "nothing to run" indistinguishable
+  from "ran and passed"). **A unit that cannot start from green — `green-check
+  --phase before` reports `red` AND the task is bound to a design unit —
+  stops and reports rather than implementing on top of a pre-existing
+  failure: the red baseline becomes its own task, and the specialist does
+  not proceed.** See `.claude/agents/devops.md`'s "Green-to-green per unit"
+  section (backend.md/frontend.md carry the same section) for the full
+  protocol an implementer follows.
+- **`criteria_tests`** — **required**, object, MAY be `{}`. v5 D5 piece 4
+  (claude-workflow-plugin-fkm.7). Maps each of the bound unit's acceptance-
+  criterion ids to the array of test references that cover it:
+  `{"U3-1": ["path/to/file.test.sh::assertion label"], "U3-2": [...]}`. `{}`
+  is legal even when `unit_id` is non-empty — not every payload has finished
+  mapping its coverage, and the plan's "criteria have tests" requirement is
+  enforced at `approve` time (`qa-gate.sh design-unit-align`), not by this
+  field's shape alone. A test reference does **not** have to also appear in
+  `tests_added` (claude-workflow-plugin-1dbz relaxed this: a REGRESSION-
+  SHAPED criterion — one asserting that some already-shipped behaviour is
+  unaffected — has no new test to add by construction, so it may honestly
+  point at a test that pre-dates this task). ONE thing IS checked at record
+  time: a non-empty map with an empty `unit_id` is refused
+  (`criteria_tests_without_unit_id`, the same one-directional shape
+  `design_hash_without_unit_id` already enforces). What record time does
+  NOT check — it has no access to the design artifact or the filesystem,
+  only to this one payload's shape — is completeness (does every criterion
+  the unit actually declares have an entry here), existence (does the named
+  file/label still exist on disk, whether or not it was ever in
+  `tests_added`), or the suite having actually run green. All three are the
+  job of `qa-gate.sh design-unit-align`, which composes this field with the
+  design artifact's own declared criteria, a live filesystem check, and an
+  externally-corroborated `green_after`; see "Per-unit alignment" below. A
+  criterion with nothing honest to name — because its whole text restates
+  green-to-green's own standing guarantee rather than naming anything
+  unit-specific — is not cleared by inventing a reference: it is removed or
+  revised through a design amendment instead (`qa-gate.sh design-conflict`).
 
-The contract is enforced by convention, not schema validation —
-the QA gate doesn't reject missing fields, but the QA agent's review
-checklist asks "did the specialist return all seven fields?"
-(`.claude/agents/qa.md` section 3) and that question being honest is
-part of QA approving. That pointer is load-bearing: through v4.0 this
-paragraph named an enforcement that did not exist — no item in qa.md's
-checklist asked the question — so the contract's only claimed backstop
-was a citation of nothing.
+### Per-unit alignment (v5 D5 piece 4)
+
+For a task bound to a design unit, `qa-gate.sh approve` also runs
+`design-unit-align` — a deterministic, no-LLM, no-bypass-flag check with
+three legs, each reusing an existing accessor rather than a new one: FILES
+(`design-conform` — touched files stay within the unit's declared set, or
+the excess reaches the gate through a reviewed design amendment, never a
+side-channel flag); FRESHNESS (`spec-injection-status` — the spec the
+implementer worked from still matches what is currently bound); CRITERIA
+HAVE TESTS (new — every criterion the unit declares has a `criteria_tests`
+entry naming a file inside the project tree that exists, a label found in
+it, and `green_after` green on the same record — corroborated, since QA
+round 7 (R7-F3), against a real `GREEN-CHECK v1 phase=after` record on the
+same task rather than trusted as the payload's own unverified claim). A
+task with no DESIGN-UNIT binding at all is
+unaffected — there is nothing to align against, and no flag is needed to
+say so. A misaligned, bound task is refused (exit 2) with no bypass; the
+two remedies are the same two `design-conform`'s own doctrine already
+states — fix the work, or amend the design and re-bind. See
+`.claude/scripts/qa-gate.sh`'s DESIGN-ALIGNMENT region for the full
+per-leg contract and the reasoning for what this check deliberately does
+NOT do (it is not part of TIER 0's idempotent re-approval recheck — a
+named, deliberate scope boundary, not an oversight).
+
+### Runtime enforcement (P7)
+
+Through v4.1 this paragraph said the contract was "enforced by
+convention" — the gate rejected nothing, and the QA agent's review
+checklist (`.claude/agents/qa.md` section 3) was the only backstop.
+That is no longer the whole story, and the correction matters because a
+field nothing validates is documentation.
+
+The specialist records the contract as its LAST action:
+
+```bash
+bash .claude/scripts/qa-gate.sh completion-record "$TASK_ID" --file <payload.json>
+```
+
+The payload is the seven fields above, plus (v5 D5, claude-workflow-plugin-
+fkm.7) the FOUR green-to-green fields — `unit_id`, `design_hash`,
+`green_before`, `green_after` (piece 3) — plus ONE more (piece 4) —
+`criteria_tests` — plus three transport keys — `"role"`, `"model"`,
+`"pin"` (claude-workflow-plugin-46w9) — none of them an eighth (or
+thirteenth) F7 field; the seven are unchanged and keep their canonical
+names and ordering. `role` supplies the record's `role=` token, naming who
+completed the task; what `model` and `pin` each mean, and why both are
+required, is in the next bullet.
+
+Three mechanisms, each in one place:
+
+- **`review-check.sh validate-completion`** is the ONE validator. It
+  rejects a payload missing any of the seven (or `role`, `model`,
+  `pin` — claude-workflow-plugin-46w9 — or, since v5 D5 piece 3,
+  `unit_id`/`design_hash`/`green_before`/`green_after`, or since v5 D5
+  piece 4, `criteria_tests`), a control character in `task_id` or `role`,
+  a wrongly-typed field, a non-string entry in `files_changed`, an
+  `llm_observations` / `context_coverage` that is empty after trimming, a
+  `model` / `pin` that fails the model-id character class, a
+  `unit_id`/`design_hash` that fails ITS character class when non-empty, a
+  `green_before`/`green_after` outside the closed `green|red|none` enum, a
+  non-empty `design_hash` paired with an empty `unit_id`
+  (`design_hash_without_unit_id` — the reverse pairing is legal), a
+  `criteria_tests` entry that is not a non-empty array of non-empty
+  strings, or a non-empty `criteria_tests` map paired with an empty
+  `unit_id` (`criteria_tests_without_unit_id` — same one-directional
+  shape, same reason). A `criteria_tests` test reference no longer has to
+  also appear in this SAME payload's own `tests_added` array
+  (claude-workflow-plugin-1dbz dropped `criteria_test_ref_not_declared` —
+  see the `criteria_tests` field entry above for why); whether such a
+  reference actually exists is `qa-gate.sh design-unit-align`'s job, at
+  approve time, against the live filesystem. The `llm_observations` /
+  `context_coverage` emptiness check named above makes this document's two
+  "a completion payload without it is malformed" sentences mechanical
+  rather than aspirational.
+- **`qa-gate.sh completion-record`** validates through that subprocess
+  — it carries no second schema — then persists the payload to
+  `.claude/.qa-tracking/completion-<task-id>.json` and appends
+  `COMPLETION v1 task=<tid> role=<r> model=<m> pin=<p> fields=<csv>
+  payload_sha=<sha256> at <ts>: <n> file(s), <m> test(s)`. `task`,
+  `role`, each field name and the digest must match
+  `^[A-Za-z0-9._+-]+$`; `model`/`pin` use the WIDER model-id class
+  `[A-Za-z0-9._:/\[\]-]` (a real id like `claude-opus-5[1m]` would be
+  truncated by the stricter class) — both REJECTED, never sanitised.
+  `pin` is the specialist's own static frontmatter `model:` reading;
+  `model` is a RUNTIME SELF-REPORT, never re-derived from the
+  frontmatter — their divergence across a task's records, compared
+  against the `model=`/`pin=` the SubagentStart hook records at spawn,
+  is the production measurement of whether the runtime honours a
+  frontmatter `model:` pin at all. The four free-form fields are never
+  interpolated: only their presence and the digest reach the record,
+  which is the injection boundary.
+- **`qa-gate.sh approve`** REFUSES (exit 2,
+  `error_key=completion_record_missing`) without such a record.
+  `--no-completion '<reason>'` is the audited bypass, for the case
+  where there was no specialist and no payload is owed; the Stop hook's
+  doc-only fast path passes it, and the reason lands in the approval
+  comment.
+
+Approve additionally REPORTS how many of the contract's declared
+`files_changed` are absent from the change set it binds. That is the
+independent completeness witness the impact-report freshness check
+structurally cannot be — freshness compares two reads of the same
+tracker, so it detects DRIFT and is blind to LOSS
+(`claude-workflow-plugin-fkm.1.20`). It reports rather than refuses,
+because the two lists are spelled differently by construction and
+legitimate asymmetry is normal; the reasoning is written out in full at
+`completion_files_crosscheck` in `.claude/scripts/qa-gate.sh`.
+
+What is still NOT enforced: quality (the validator accepts a
+non-answer as `context_coverage`; the rubric grader judges that under
+C3/C8), truth (nothing verifies a declared file was read), the final
+message (the e2e `completion-contract` invariant remains `skipped` on
+its trace gap, so nothing checks that the payload EMITTED matches the
+one RECORDED), and forgery by an agent with arbitrary shell — the same
+threat-model boundary the approval record and the rubric verdict carry.
 
 ---
 

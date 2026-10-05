@@ -1,0 +1,71 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-gsfd",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "c4ec5a4e99898a0cf35e3af3d72ec9a92031e857b94e4e510196d9fbeae25720",
+  "risk_threshold": "high",
+  "stop_condition": "all eight round-1 findings adjudicated FIXED/PARTIAL/NOT-FIXED against the post-fix tree, plus the orchestrator's acceptance measurement folded in; verdict reached without hitting any cap",
+  "verdict": "findings",
+  "iterations": 2,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/scripts/tree-lease.sh:468-474 (lease_reclaim_stale), reached from lease_acquire",
+      "evidence": "The implementer closed R1-F2's pid-reuse half (verified: _lease_pid_start_matches at :404-424 back-computes started_at = now - measured_elapsed at :313-336) but left the cross-host hostname-collision residual open, arguing it is bounded because every consumer of the signal is advisory-only. Sol enumerated the consumer graph rather than accepting the claim: lease_conflicts feeds lease_conflict_summary, lease_reclaim_stale AND the read-only CLI; lease_reclaim_stale is called SYNCHRONOUSLY by every lease_acquire; all three integrated callers invoke lease_acquire. So two hosts sharing a hostname make kill -0 fail locally, classify the foreign LIVE lease STALE, and REMOVE it at :468-474 before creating the new lease.",
+      "description": "The residual is a removal and a loss of ownership state, not a missing notice. It directly contradicts CHANGELOG.md:59-63. R1-F2 is PARTIALLY FIXED, and the specific defense offered for shipping the remainder is false — an enumerated-denominator claim asserted rather than performed, which is the defect family this release exists to close."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "high",
+      "location": ".claude/tests/component/specs/verify-before-stop.sh (META 10b), measured in the orchestrator's L2 acceptance run",
+      "evidence": "MEASURED by the orchestrator in an uncontended `make test-component` (rc=2, 10553s, 3140 assertions passed / 3 failed, 46 specs, 0 skipped, content-stable both sides): `FAIL: META 10b: the mutant's escalated replay still blocks (same shape, not a different failure path)` — path .decision, expected `block`, actual EMPTY. Every shipped-artifact leg of 10b passes (the escalated replay blocks; the reason carries the ACTUAL captured tail; it does not show the other run's content).",
+      "description": "The negative control for the R1-F6 fix does not reproduce the targeted defect: the mutant emits no decision at all rather than blocking, so it fails for the wrong reason. The very next assertion ('WITHOUT replay_cached_tails_for the mutant does NOT recover the tail') then passes vacuously, because empty output trivially lacks the tail. This is the same crash-instead-of-defect class the implementer reported fixing elsewhere by stripping only a function body. As it stands the control proves nothing about R1-F6."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/tree-lease.sh:374-376 (lease_release), called bare at .claude/scripts/verify-before-stop.sh:4268",
+      "evidence": "lease_release documents a best-effort contract that always returns 0, but under the Stop hook's `set -e` a failing `rm -f` (e.g. lease-directory permissions change mid-suite) exits the shell at :376 before `return 0` is reached. The Stop hook calls it bare.",
+      "description": "A cleanup failure can abort the Stop hook before cache persistence and before its JSON output. A Stop hook that produces no output is NON-BLOCKING, so the failure direction is release-on-error — the worst direction, and silent."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh:4277-4329 (replay cache) vs .claude/scripts/qa-gate.sh:2619,4708 (wipe)",
+      "evidence": "Sequential replay is fixed and verified: both replay branches restore the captured tails and sequential cycle transitions clear them. But the verdict and the three tail files are separate, unversioned writes. Two concurrent Stops on one task can interleave last-failed-checks and tail writes, pairing one run's verdict with another run's tail. Additionally qa-gate.sh enter/choose can wipe at :2619/:4708 while an older Stop is still running, and that Stop can then repopulate the just-wiped files at :4282-4317 and record replay state at :4329.",
+      "description": "R1-F6 is PARTIALLY FIXED. A later cycle can replay an earlier cycle's evidence — the same defect pointing the other way. The cache needs an atomic, generation-bound snapshot tied to the verdict and cycle."
+    },
+    {
+      "id": "R2-F5",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2692 (census)",
+      "evidence": "The new double-quoted pass does catch 2>\"/tmp/x\", and because it is a separate output pass the JSON trailing-quote filter cannot swallow it; the caller captures the return code at :2718-2723 so rc=3 is not absorbed. Two gaps remain: single-quoted targets (2>'/tmp/x') miss BOTH passes; and rc=3 detects a missing or zero-file population but not an unreadable file inside a present one — find may list an unreadable .sh, both greps suppress the open error, and the unconditional return 0 reports clean. The same holds after a partial find failure, whose status is discarded by process substitution.",
+      "description": "R1-F7 is PARTIALLY FIXED. The no-reintroduction guarantee still has a spelling that evades it, and enumeration failure can still read as clean for the per-file case."
+    },
+    {
+      "id": "R2-F6",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/tree-lease.test.sh:241 (owner_host), CHANGELOG.md:105-107",
+      "evidence": "META 9 and META 10 structurally satisfy all four parts of the pairing standard (exact mutation with a checked hit, syntax check, specific mutant outcome, matching shipped control, calls through the sourced shipped artifact), and the field assertions now exercise owner_host and started_at with META 12 pairing the start-time semantics. However owner_host serialization has NO negative-control mutation at all, while CHANGELOG.md:105-107 states all four additions have dedicated META tests.",
+      "description": "R1-F8 is PARTIALLY FIXED. One field check is plausible-by-reading but unpaired, and the CHANGELOG overstates the coverage — a claim about checks that the checks do not support."
+    },
+    {
+      "id": "R2-F7",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2446 (poll_for_dolt_flusher), assertions 15.9/15.10",
+      "evidence": "MEASURED BOTH WAYS by the orchestrator. Contended (L1 acceptance overlapping a Stop-hook `make test`): 15.10 FAILED, expected not-seen / actual seen. Idle re-run of the same spec: rc=0 with 15.9 and 15.10 both PASS. Sol confirmed the mechanism by reading: all three scans match any `dolt send-metrics` process host-wide via ps -axo args=, with no attribution to the store just called; the bounded pre-drain neither fails when its limit expires nor prevents a foreign process starting inside the detection window.",
+      "description": "The underlying telemetry disarm WORKS — that is established. The defect is in the check: foreign Dolt activity can make 15.10 falsely red and, symmetrically, 15.9 falsely green, so the pair cannot distinguish a failed disarm from unrelated Dolt activity. An attributable probe should key on a newly observed pid whose cwd is the exact fixture store (/proc/<pid>/cwd on Linux, lsof on macOS) or run in an isolated process namespace."
+    },
+    {
+      "id": "R2-F8",
+      "severity": "low",
+      "location": "CHANGELOG.md:103-104",
+      "evidence": "R1-F5 is FIXED behaviourally — sourcing no longer changes the caller's nounset state, and direct execution still enables set -u before CLI argument parsing, with ${1:-}/${2:-} safe. But the stated rationale, that function bodies were never protected because bash evaluates set -u at call time rather than definition time, is wrong: the old file-scope set -u persisted in the sourcing shell, so later function CALLS were in fact executed under nounset. Definitions were not evaluated under nounset; calls were.",
+      "description": "The fix is sound and the documentation explaining it is not. It does not reopen the state-leak fix, but the ledger entry as written would mislead the next reader about why the change was safe."
+    }
+  ]
+}

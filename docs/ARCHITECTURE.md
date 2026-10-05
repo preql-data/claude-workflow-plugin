@@ -67,11 +67,16 @@ The plugin implements an **orchestrator-first architecture** where:
 
 ## Hooks
 
-The plugin wires 6 Claude Code hook events in `.claude/settings.json`
-(SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop,
-SessionEnd); the plugin-manifest `.claude/hooks/hooks.json` adds a 7th,
-SubagentStart, for plugin-scoped installs. The numbered subsections below
-cover the load-bearing ones:
+The plugin wires **7** Claude Code hook events directly in
+`.claude/settings.json` — SessionStart, UserPromptSubmit, SubagentStart,
+PreToolUse, PostToolUse, Stop, SessionEnd, confirmed with
+`jq '.hooks|keys[]' .claude/settings.json` against the live file. The
+plugin-manifest `.claude/hooks/hooks.json` mirrors the same seven events
+for plugin-scoped installs; it does not add an eighth. Its only addition
+beyond `settings.json` is a second `PostToolUse` matcher (`^Bash$` →
+`bd-github-link.sh`) — see [`docs/HOOKS.md`](../docs/HOOKS.md) "Hook
+Configuration" for the exact diff between the two files. The numbered
+subsections below cover all seven:
 
 ### 1. SessionStart
 
@@ -122,31 +127,132 @@ ledger row.)
 
 **Output**: JSON with `additionalContext` carrying the workflow contract
 
-### 3. PostToolUse
+### 3. SubagentStart
 
-**Trigger**: After Write, Edit, or MultiEdit tools
+**Trigger**: When Claude Code spawns a subagent (the payload carries
+`agent_type` — e.g. `@backend`, `@qa`, or a built-in like
+`general-purpose`)
+
+**Purpose**: J3 cross-session auto-assign. Hand the spawned specialist the
+active Beads task without the orchestrator having to repeat it in the
+`Task()` prompt. This hook **cannot block the spawn** — the only channel
+it has is injecting `additionalContext` into the new subagent's first
+turn.
+
+**What it does**:
+```bash
+# 1. Read agent_type from stdin
+# 2. If agent_type is a specialist (backend/frontend/devops/qa, with or
+#    without a leading @) AND current-task.sh is non-empty: inject
+#    additionalContext with the task id + a header-only `bd show` summary
+# 3. For the three IMPLEMENTING roles (backend/frontend/devops — never
+#    qa), append an `IMPLEMENTER: role=<r> task=<t> at <ts>` Beads
+#    comment, once per (role, task, review cycle) — the record
+#    review-check.sh reads to refuse a self-review
+# 4. If the active task carries a DESIGN-UNIT binding (v5 D5), splice the
+#    unit's declaration verbatim into additionalContext and record a
+#    SPEC-INJECTED v1 comment with a per-unit content hash
+# 5. Otherwise (no specialist, no current task, any read failure) emit {}
+#    and exit cleanly — silent on every error, per principle 3
+```
+
+**Output**: `additionalContext` injected into the spawned subagent's first
+turn, or `{}`. There is no `permissionDecision` field for this event — it
+cannot deny or delay the spawn, only inform it.
+
+### 4. PreToolUse
+
+**Trigger**: Before a `Write`, `Edit`, or `MultiEdit` tool call (matcher
+`^(Write|Edit|MultiEdit)$`)
+
+**Purpose**: Defense-in-depth complement to the orchestrator's own tool
+list, which is the primary guard (it omits `Write`/`Edit`/`MultiEdit`
+outright). When the payload's subagent identity clearly resolves to the
+orchestrator, deny the edit; otherwise allow.
+
+**What it does**:
+```bash
+# 1. Probe several candidate JSON paths for the active subagent name (the
+#    schema has evolved across runtime versions; empty/null fields are
+#    skipped rather than treated as a match)
+# 2. Normalize: lower-case, strip a leading "@", trim whitespace
+# 3. Exact-match (never substring) against orchestrator |
+#    subagent_orchestrator | claude-orchestrator — avoids false positives
+#    like "data-orchestrator-pipeline"
+# 4. Match: deny, with a "delegate to a specialist" reason
+#    No reliable signal: allow ({}) — never false-positive when identity
+#    isn't surfaced (v5 plan correction 9 forbids re-scoping this hook)
+```
+
+**Output**: `{"hookSpecificOutput": {"hookEventName": "PreToolUse",
+"permissionDecision": "deny", "permissionDecisionReason": "..."}}` on
+block, `{}` otherwise. Bash is **not** matched — `tool_input.command` has
+no path field, so a write-shaped Bash command cannot be denied here; this
+is an accepted, documented residual (see `docs/HOOKS.md`).
+
+### 5. PostToolUse
+
+**Trigger**: After the Write, Edit, MultiEdit or NotebookEdit tools — the four
+whose `tool_input` carries a path (`file_path` for the first three,
+`notebook_path` for NotebookEdit; that spelling is sourced from the runtime's own
+tool schema, see HOOKS.md "Matcher"). Bash is NOT matched and cannot be
+(`tool_input.command` has no path field); files written by a shell redirect are
+folded in from `git status` by `qa-gate.sh reconcile-tracker` instead (94d) —
+partially: that reconcile subtracts the gate baseline over raw porcelain lines,
+so it catches a shell-written path that was clean at baseline capture and misses
+a second write to a path the baseline already lists (HOOKS.md, "The tracker
+reconcile", the line-granularity limit under "Known limits";
+`claude-workflow-plugin-dpe`). What it misses is now **counted and named** in
+every observation (`subtracted=N`, plus the paths and
+`.claude/.qa-tracking/reconcile-subtracted.txt`) rather than silently dropped —
+the miss is unchanged, its invisibility is not (94d.1). The reconcile is also
+**not a recovery path** for a lost tracker: two of the sixteen paths lost in the
+occurrence that filed 94d.1 were invisible to `git status` altogether, so
+prevention lives at the deleter.
 
 **Purpose**: Track file changes for QA review
 
 **What it does**:
 ```bash
-# 1. Extract file path from tool input (.tool_input.file_path // .path)
+# 1. Extract file path from tool input
+#    (.tool_input.file_path // .path // .notebook_path)
 # 2. Apply a build-artifact DENYLIST (node_modules/, dist/, build/,
 #    *.lock, *.min.js, lockfiles, ...) — everything NOT matched is
 #    tracked, including .md/.json/.yaml/.toml/.tf/.proto. (Not an
 #    extension allowlist: a narrow allowlist was the B6 antipattern this
 #    hook was rewritten to avoid — see CLAUDE.md and HOOKS.md.)
-# 3. Add to tracking file (deduplicated, flock-guarded when available)
-# 4. Trim only when the file exceeds 1000 entries, keeping the last 500
-#    (race-tolerant: 2x headroom so concurrent appenders don't lose data)
-# 5. Update Beads with progress (batched every 10 edits)
+# 3. Apply the SELF-WRITTEN rule from the same lib (94d):
+#    workflow_self_written drops .claude/.qa-tracking/** and
+#    .beads/interactions.jsonl — paths the gate itself rewrites on every
+#    invocation. NOT .beads/issues.jsonl, which is the committed ledger.
+#    This is the WRITER side of the rule; qa-gate.sh's reconcile applies
+#    the same one, so the tracker (and therefore change_set_hash) can
+#    never become a function of the gate's own progress. See HOOKS.md,
+#    "The second rule: workflow_self_written".
+# 4. Apply RECORD-TIME CONTAINMENT (fkm.1.15): a path outside
+#    $CLAUDE_PROJECT_DIR is dropped AND logged to sync-errors.log. This one
+#    is NOT in the shared lib — it compares against a runtime root rather
+#    than matching a pattern, and it has exactly one applier, because the
+#    only other tracker writer takes its paths from git status inside the
+#    repo. Relative paths are kept (resolved against the root); both the
+#    logical and physical spellings of the root are accepted. It closes the
+#    OVER-coverage half of 94d's acceptance list: before it, a scratch file
+#    an agent wrote to /tmp entered change_set_hash and staled the impact
+#    report. See HOOKS.md, "The third rule: record-time containment".
+# 5. Add to tracking file (deduplicated, flock-guarded when available)
+# 6. Trim only when the file exceeds 1000 entries, keeping the last 500
+#    (2x headroom so concurrent appenders don't lose data) — and ONLY under
+#    flock (94d). The trim is a read-modify-write; without a lock it can
+#    discard a path appended mid-trim, and a discarded path is a file the
+#    Stop gate never sees and no approval covers. No flock: skip and log.
+# 7. Update Beads with progress (batched every 10 edits)
 ```
 
 **Output**: `{}` — a valid empty `hookSpecificOutput` no-op. This hook only
 records state; the Stop hook surfaces the "changes require QA review"
-context. (`post-edit.sh:53` `emit_empty() { echo '{}'; }`.)
+context. (`post-edit.sh:75` `emit_empty() { echo '{}'; }`.)
 
-### 4. Stop
+### 6. Stop
 
 **Trigger**: When Claude attempts to complete/stop
 
@@ -167,15 +273,27 @@ context. (`post-edit.sh:53` `emit_empty() { echo '{}'; }`.)
 
 **Output**: Either `{}` (allow) or `{"decision": "block", "reason": "..."}` 
 
-### 5. SessionEnd
+### 7. SessionEnd
 
 **Trigger**: When session ends
 
-**Purpose**: Ensure Beads state is persisted
+**Purpose**: Detect whether the JSONL ledger — what a fresh clone recovers the
+issue database from — still matches the database. It writes nothing.
 
 **What it does**:
 ```bash
-bd sync
+bash .claude/scripts/beads-ledger.sh check    # READ-ONLY; wraps a bd export to a temp file
+```
+
+`bd sync` was REMOVED in bd 1.1.2, and the automatic ledger write that briefly
+replaced it was removed too (R4-F1): five defects came out of letting an
+unattended hook decide when writing was safe. So SessionEnd RECORDS a
+divergence to `sync-errors.log`, `session-start.sh` surfaces it next session,
+and `workflow-doctor.sh`'s `beads_ledger` check reports it as a FAIL. Repair is
+always an explicit operator action:
+
+```bash
+bash .claude/scripts/beads-ledger.sh reconcile --apply
 ```
 
 ---
@@ -335,7 +453,7 @@ fi
 The tracking file is trimmed only when it grows past **1000** entries, and
 is then reduced to the last 500 (deduplicated). The 2x headroom is
 deliberate: it keeps the trim race-tolerant so concurrent appenders don't
-lose data (`post-edit.sh:98-105`):
+lose data (`post-edit.sh:366-378`):
 ```bash
 if [ "${LINE_COUNT:-0}" -gt 1000 ]; then
     # (flock-guarded when available)
@@ -405,12 +523,19 @@ the operator's own environment, not from `permissions.deny`.
 QA tracking data is session-local:
 ```
 .claude/.qa-tracking/
-├── changed-files.txt    # Cleared each session
+├── changed-files.txt    # Cleared each session — EXCEPT while a gate cycle is in
+│                        # flight (`current-task` set), when SessionStart preserves
+│                        # it. It is the change set the review is reading, and a
+│                        # rebuild from `git status` can only ever be a subset
+│                        # (94d.1; HOOKS.md "The tracker survives a session
+│                        # boundary")
 ├── approved             # Marker file
 └── edit-count           # Counter for batching
 ```
 
-This data is gitignored and not persisted.
+This data is gitignored and not persisted. The full inventory — the gate
+baseline, impact reports, the subtracted-path sidecar, the logs — is in HOOKS.md
+under "Tracking File Location"; this is the short list, not the whole directory.
 
 ---
 

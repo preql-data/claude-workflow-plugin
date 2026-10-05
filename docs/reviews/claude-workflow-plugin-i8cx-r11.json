@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "f32886df78bc7a1b44d087c67530f3fa2e186c288c37a85e39357f9987a1e5e2",
+  "risk_threshold": "high",
+  "stop_condition": "Report HIGH only for: a route by which forged free text still authorizes a release; a\ngenuine audited bypass the anchor now wrongly refuses; a path by which approve reports\nsuccess while an open design conflict exists; a record-selection outcome decided by\ncomment position; or a legitimate task any of these three fixes has deadlocked.\nMEDIUM/LOW otherwise. If there is no HIGH, say so plainly rather than manufacturing one.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R11-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:1673",
+      "evidence": "The new selector treats any non-integer iteration token in any historical candidate as baditer and its END block refuses the entire set forever. Yet validate-artifact only checks that iterations exists (lines 231-237), never that it is an integer, and returns artifact valid at line 347; the official review-record path then reads that accepted value at qa-gate.sh:6310 and writes it verbatim into iteration= at qa-gate.sh:6428. Thus an artifact with iterations=1.5 or a nonnumeric string is accepted and recorded through the legitimate writer, after which every gate call refuses even if a later well-formed review is appended, because the old bad candidate remains in the append-only comment stream.",
+      "description": "This creates a permanent deadlock for a legitimately recorded task. The new global poison-record rule has no recovery path: adding a corrected, higher-iteration artifact cannot clear review_artifact_iteration_unparseable. The writer/validator must reject such values before recording, or selection must provide an order-independent way for a later valid record to supersede them."
+    }
+  ],
+  "iterations": 11,
+  "stopped_by": "stop_condition"
+}

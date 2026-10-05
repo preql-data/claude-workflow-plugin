@@ -23,20 +23,87 @@
 # context).
 #
 # Portability:
-#   - All jobs run on ubuntu-latest. shellcheck is pre-installed on the
-#     standard runner image so the lint job just calls `make lint`.
-#   - jq is also pre-installed; bd (Beads CLI) is not — L1/L2 invoke bd
-#     only inside specs that have a `bd` shim or self-skip. We mirror
-#     the local convention of skip-with-log rather than failing.
-#   - Node 20 (LTS) for the L3 jobs.
+#   - All jobs run on ubuntu-latest.
+#   - shellcheck: the lint job downloads, checksum-verifies and installs a
+#     PINNED release (0.11.0) ahead of the runner image's own bundled copy
+#     on PATH, before calling `make lint` — it is NOT relying on whatever
+#     shellcheck version the runner image happens to bundle (claude-
+#     workflow-plugin-h2zz; see that job's install step: the bundled 0.9.0
+#     disagreed with every developer's local install and showed red for a
+#     version gap, not a real finding).
+#   - jq is pre-installed on the runner image; nothing in this workflow
+#     installs it.
+#   - git identity: the l1-unit and l2-component jobs each configure one
+#     via GIT_CONFIG_GLOBAL before their own suites run (claude-workflow-
+#     plugin-h2zz — see either job's "Configure git identity" step for the
+#     full account). A bare ubuntu-latest runner has no configured
+#     user.email/user.name and no resolvable hostname, and several fixture
+#     helpers in both tiers commit as part of their own setup.
+#   - bd (Beads CLI): the l1-unit job installs the REAL bd from a pinned,
+#     checksum-verified release tarball (a9hh — see the job's install
+#     step). The historical claim that Beads had "no easy public
+#     installer URL" stopped being true when steveyegge/beads started
+#     publishing per-platform release binaries; pinning version + sha256
+#     is deliberate (a tag can move, a digest cannot). l2-component does
+#     NOT install it — that job runs under BD_SHIM_ONLY=1 instead (below).
+#   - dolt: the l1-unit job ALSO installs a pinned, checksum-verified dolt
+#     release (claude-workflow-plugin-h2zz — see that job's install step),
+#     mirroring the bd step's own discipline. Needed only by the small
+#     number of sections that query the embedded store directly via
+#     `dolt sql`; every other bd-dependent spec passes without it, through
+#     bd's own bundled embedded engine.
+#   - Node 20 (LTS) for the L3 jobs; l1-unit also sets up node and runs
+#     `npm ci` for BOTH MCP servers — bd-mcp (which
+#     mcp-unestablished-results.test.sh drives) and code-graph-mcp (which
+#     impact-report.test.sh section 4 drives live). Neither has install
+#     scripts or native builds, so both are pure download+extract.
 #
-# BD_SHIM_ONLY=1 — set on the l1-unit and l2-component jobs. Beads has
-# no easy public installer URL we can curl in CI; rather than vendoring a
-# binary or spinning up a separate setup action, we let bd-dependent
-# specs skip-with-log when the env var is set. Each spec calls
-# `bd_required_or_skip` (or the L1 equivalent) near the top, prints a
-# single "SKIPPED:" line, and exits 0. Dev machines (where bd IS
-# installed) take the normal path and run the full coverage.
+# BD_SHIM_ONLY=1 — now set ONLY on the l2-component job. Under it,
+# bd-dependent specs (via lib/fixture.sh `bd_required_or_skip`) print a
+# "SKIPPED:" line and exit 0. What the runner does with that, MEASURED
+# rather than asserted (a9hh R7-F2 falsified this comment's earlier
+# "never as passes / 7-spec remainder" claim; cmd: bd off PATH +
+# BD_SHIM_ONLY=1, `bash .claude/tests/component/run.sh`, final a9hh
+# R6/R7 bytes at HEAD 535c89a, macOS and ubuntu:24.04/aarch64 both):
+#   Specs: Total: 44  Passed: 12  Failed: 1  Skipped: 31  Partial: 2
+# A whole-file skip is SKIPPED (never a pass) under a COMPLETENESS
+# caveat; a spec that ran assertions BEFORE its bd gate is PASSED with
+# its executed count and counted Partial — the executed set this job
+# really measures is 13 specs (12 passed + the pre-existing
+# installer-v3-upgrade 8e-B failure), of which post-edit.sh (101 of its
+# 115 assertions) and reviewer-lane-degradation.sh (4 of 8) are the two
+# partials. 37 of 44 specs carry the helper, but how much of each
+# executes before gating is a property of the spec's layout, not of the
+# helper census — which is why the numbers above are measured, and why
+# the job pins none of them (the assertion totals are additionally
+# environment-sensitive). Installing bd here too — and putting an L2
+# floor under the tier — is the recorded follow-up on a9hh (u84b); it
+# was deliberately kept out of the L1 round so the l2-component job's
+# semantics moved by one reviewed decision, not as a side effect.
+#
+# The L1 tier has NO skip mode any more: a9hh measured 286 of 2461
+# assertions (11.6% of the tier, review-separation's 60 included)
+# silently unexecuted under a byte-identical green summary. Precisely:
+# five whole-file BD_SHIM_ONLY arms (bd-github-link, qa-gate-choose,
+# qa-gate-grade-record, review-separation, phase5-synthetic-tests) and
+# one section-level BD_SHIM_ONLY note arm (mcp-unestablished-results
+# :489) were deleted. mcp-unestablished-results.test.sh KEEPS its
+# whole-file node/node_modules arm at :115-122 — correctly: it names a
+# prerequisite, and it is now classified SKIPPED and fails the tier, so
+# this job installs the prerequisite instead of arguing with the arm.
+# The runner classifies exit-0-with-zero-assertions as SKIPPED-not-
+# passed, and a completeness floor (EXPECTED_SPECS) fails the run when
+# the discovered set shrinks. See run-tests.sh's floor block — it is the
+# negative control for the completeness line, and the pairing
+# convention's first application.
+#
+# STRICT_SECTIONS=1 (l1-unit only) closes the granularity gap under it:
+# the floor counts SPECS, so a spec that ran 24 of its 39 assertions and
+# printed a `SKIPPED: section ...` marker still counted as "executed".
+# That is how a9hh's own first fix round shipped a green 36/36 over 15
+# unexecuted assertions. Under the flag a section skip is red — HERE,
+# where every prerequisite is provisioned; unset elsewhere, where a dev
+# machine may legitimately lack one.
 
 name: tests
 
@@ -68,6 +135,32 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+      - name: Install shellcheck (pinned release, checksum-verified)
+        # claude-workflow-plugin-h2zz: the runner image's BUNDLED shellcheck
+        # (0.9.0 on ubuntu-latest, measured) is older than every developer's
+        # local Homebrew install (0.11.0, measured) and disagrees with it:
+        # `make lint` is 0 findings / exit 0 locally on 0.11.0, and 0.9.0
+        # reports SC2015/SC2317 info findings plus one SC2002 at
+        # install.sh:2150 that 0.11.0 no longer flags. The job is
+        # continue-on-error: true so this never blocked merge, but it showed
+        # red for a version gap, not a real finding -- and a red advisory
+        # check is exactly the kind everyone learns to stop reading (the same
+        # reasoning STRICT_SECTIONS below is built around). Pin to the exact
+        # version local development already runs, mirroring the bd install
+        # step's own discipline: pinned version, checksum verified, installed
+        # to /usr/local/bin (ahead of the image's own bundled copy on PATH,
+        # same reasoning as bd -- a moved tag can't silently swap the binary
+        # out from under this pin, only a changed, re-reviewed digest can).
+        # Deliberately NOT a .shellcheckrc: suppressing severities would hide
+        # findings rather than fix the version drift, and pinning to 0.11.0
+        # surfaces none anyway (verified locally: `make lint` on 0.11.0 is
+        # clean).
+        run: |
+          curl -fsSL --retry 3 -o /tmp/shellcheck.tar.gz \
+            "https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz"
+          echo "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6  /tmp/shellcheck.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/shellcheck.tar.gz -C /usr/local/bin --strip-components=1 shellcheck-v0.11.0/shellcheck
+          shellcheck --version
       - name: Verify shellcheck available
         run: |
           if ! command -v shellcheck >/dev/null 2>&1; then
@@ -84,18 +177,504 @@ jobs:
   l1-unit:
     name: L1 — bash unit tests
     runs-on: ubuntu-latest
+    # NO BD_SHIM_ONLY here any more (a9hh): this job installs the real bd
+    # below, five whole-file BD_SHIM_ONLY skip arms and one section-level one
+    # are deleted, and the runner's completeness floor fails the run if the
+    # executed set ever shrinks again.
+    #
+    # THIS JOB IS THE STRICT ENVIRONMENT. It provisions every prerequisite the
+    # tier's section arms name — bd, dolt, node, AND both MCP servers'
+    # node_modules — so STRICT_SECTIONS=1 below is defensible: here, a skipped
+    # section is a dropped provisioning step or a new arm nobody provisioned,
+    # never "this laptop doesn't have X". A section-granular sweep of all 36
+    # specs at 535c89a + that change set found exactly one arm that fired in
+    # this job (impact-report.test.sh section 4, 15 assertions, fixed by the
+    # code-graph-mcp step below); claude-workflow-plugin-h2zz adds dolt to
+    # this environment and, measured directly in an ubuntu:24.04 container
+    # rather than assumed, the effect is NOT uniform across the three specs
+    # that gate a section on `command -v dolt`:
+    #   - runner-completeness.test.sh's store-canary legs (13a onward) build
+    #     their OWN fresh embedded-Dolt store via `bd init` inside the spec's
+    #     own tmpdir, so dolt being on PATH is both necessary and sufficient;
+    #     measured firing (no longer SKIPPED) once dolt is installed.
+    #   - workflow-doctor.test.sh's META-TEST 8 ALSO builds its own fresh
+    #     store the same way, and dolt being on PATH IS sufficient to make it
+    #     RUN — but running is not the same as passing: its own "control"
+    #     assertion fails, because `DOCTOR_BD_SCHEMA_PIN="1.3.0:66"` (that
+    #     constant, this file's own workflow-doctor.sh) was set to match a
+    #     bd version (1.3.0) that this repo's own installer had put on a dev
+    #     machine mid-arc: its since-removed upgrade step, which
+    #     installer-flags.test.sh triggered (see that constant's own header;
+    #     claude-workflow-plugin-dhh7/u443, wyt3)
+    #     and was never reconciled against the bd version this job actually
+    #     pins everywhere (1.1.2). Measured directly, following that
+    #     constant's own documented update procedure, against THIS job's
+    #     exact pinned pair (bd 1.1.2 + dolt 2.3.5): the live pair is
+    #     `1.1.2:53`, not `1.3.0:66`. Installing dolt is correct and does
+    #     what it is supposed to — it turns a silent, unqualified SKIP into a
+    #     named, attributable FAIL of a genuine, pre-existing drift that had
+    #     no way to surface while this section could never run in CI. Fixing
+    #     the pin itself is OUT OF SCOPE for h2zz (workflow-doctor.sh is
+    #     product code, not one of its eight named fixes) and is filed
+    #     separately rather than guessed at here.
+    #   CORRECTION (claude-workflow-plugin-we57/0cr6, 2026-09-28): the "out of
+    #     scope, filed separately" fix above has landed, and this paragraph
+    #     now describes a PAST failure, not a current one. `DOCTOR_BD_SCHEMA_
+    #     PIN` (a single exact pair) became `DOCTOR_BD_SCHEMA_VALIDATED` (a
+    #     membership set), specifically including `1.1.2:53` — THIS job's own
+    #     pinned pair — alongside `1.3.0:66`.
+    #   SUPERSEDED, then RESOLVED (claude-workflow-plugin-wyt3). From bd
+    #     v1.3.1's publication on 2026-09-30T23:37Z this job's META-TEST 8a
+    #     control FAILED: run 36971074875's disclosure reported `installed bd
+    #     1.3.1 / store schema v66`, with exactly ONE bd on PATH —
+    #     /usr/local/bin/bd, the path THIS job installs 1.1.2 to,
+    #     sha256-verified — and no second bd downloaded in the job. The pinned
+    #     binary was being overwritten mid-suite.
+    #     THE AGENT, named by hashing /usr/local/bin/bd before and after every
+    #     spec in a container: installer-flags.test.sh. It drove install.sh
+    #     past its bd version floor with a fabricated bd reporting 0.99.0, and
+    #     install.sh then ran its beads upgrade — an UNPINNED `curl ... |
+    #     bash` that installs whatever beads released last — over this job's
+    #     pinned binary. Three fixes close it: the fixture now reports a
+    #     validated version, install.sh no longer upgrades bd automatically,
+    #     and run-tests.sh exports BD_UPGRADE_COMMAND=true for every spec. The
+    #     BD-CANARY in run-tests.sh now fails, by name, any spec that rewrites
+    #     a bd binary. Installing a version is still not the same as measuring
+    #     it, which is why this job's evidence is the doctor's own disclosure
+    #     of the measured pair and binary, not the install step.
+    #     See workflow-doctor.sh's own
+    #     DOCTOR_BD_SCHEMA_VALIDATED header for why a set rather than a wider
+    #     pin (the schema number is not monotonic in bd's release order — a
+    #     floor or interval would be meaningless), and the l1-doctor-bd-max
+    #     and l1-doctor-bd-1-3-1 jobs below this one for how the set's other
+    #     members (1.3.0:66, 1.3.1:66) are exercised too, rather than resting
+    #     on "the development host agrees" the way this paragraph originally
+    #     had to.
+    #   - model-roles.test.sh's 11.4 (and the identically-gated setup earlier
+    #     in that file computing the same production-store HEAD) checks the
+    #     PROJECT'S OWN store at a fixed path, `.beads/embeddeddolt/beads` —
+    #     never a fresh fixture. That directory is gitignored (confirmed:
+    #     `git ls-files .beads/` lists 8 tracked files, none under
+    #     embeddeddolt/), so a byte-for-byte fresh checkout — confirmed
+    #     directly against a real `git clone` of this exact ref — never has
+    #     one. dolt being on PATH is necessary but not sufficient here; this
+    #     section skips in CI whether or not dolt is installed, for a
+    #     different and unrelated reason h2zz's dolt fix does not touch.
+    # h2zz's own diagnosis is why this inventory is being corrected now: dolt
+    # was never mentioned here at all, which is precisely the staleness this
+    # comment exists to prevent — and per the same discipline, its FIRST
+    # correction does not repeat an unverified claim about what installing it
+    # accomplishes; the three outcomes above are measured, not assumed, and
+    # they are three DIFFERENT outcomes, not one. Verify locally with both bd
+    # and dolt on PATH (`command -v bd && command -v dolt`) before trusting a
+    # green run of any of the three; the arms that STILL do NOT fire, and why
+    # (model-roles.test.sh 11.4 now included), are:
+    #   installer-flags 258/305/428  bd must not resolve under
+    #                                /usr/bin:/bin:/usr/sbin:/sbin — hence bd
+    #                                is installed to /usr/local/bin below, and
+    #                                moving it into /usr/bin would silently
+    #                                skip three positive-control sections
+    #   installer-flags 195          only when plugin.json is on a 3.x version
+    #   model-roles 11.4 + its       the PROJECT'S OWN .beads/embeddeddolt/
+    #     production-store setup     beads store, gitignored and therefore
+    #                                absent from any fresh checkout — dolt
+    #                                on PATH is necessary but not sufficient
+    #   workflow-manifest 532        needs a non-root uid (GitHub runners are
+    #   gate-claim-honesty 1247      the `runner` user, not root)
+    #   impact-report 3/4 (node),
+    #     6 (sha256sum), 4 (tmpdir
+    #     inside a git checkout)     node via setup-node; coreutils; mktemp
+    #                                gives /tmp, which is not a checkout
+    #   mcp-deps-preserve 347        npm, via setup-node
+    #   workflow-doctor 5a, META-TEST
+    #     3/4/5                      fire only when the live repo moves under
+    #                                the run, when bd/node_modules are absent
+    #                                (both provisioned here), or when their own
+    #                                control failed
+    #   mcp-unestablished-results,
+    #     worktree-sweep             WHOLE-FILE arms (node/node_modules; jq+git)
+    #                                — already red as SKIPPED since a9hh, and
+    #                                provisioned here
+    # Two arms are NOT marker-shaped and so are invisible to STRICT_SECTIONS.
+    # Both were checked by hand and neither can fire in this job:
+    #   mutation-harness 652         `if command -v jq` guards one assertion
+    #                                silently — unreachable, because
+    #                                run-tests.sh itself exits 2 without jq
+    #   gate-claim-honesty 542/2086, git/make/jq absences that `exit 2` or
+    #     packaging-parity 398       `exit 1` — a FAILURE, never a skip
+    # And no spec exits 0 part-way through after running assertions: every
+    # mid-file `exit 0` in the tier is inside a fixture heredoc (checked).
+    # That list is a snapshot, which is exactly why STRICT_SECTIONS exists:
+    # the next arm added does not need anyone to redo the sweep.
     env:
-      # See workflow header — bd has no public CI installer; specs
-      # self-skip when this is set.
-      BD_SHIM_ONLY: "1"
+      STRICT_SECTIONS: "1"
     steps:
+      # claude-workflow-plugin-h2zz waiver ruling (round 4): this step used to
+      # request fetch-depth: 0 so tests/workflow-manifest.test.sh section 6
+      # could regenerate the current release's frozen table from that
+      # release's TAG (git archive) and byte-compare. That section, its
+      # pre-release-ref exemption, and the attestation step that used to run
+      # here are all REMOVED (see run-tests.sh's PRE-RELEASE-REF EXEMPTION:
+      # REMOVED tombstone for the full six-finding account) — L1 no longer
+      # makes any assertion that needs the release tag reachable, so the
+      # default shallow checkout is sufficient again. The tag/table
+      # comparison itself is not gone: it moved to
+      # .claude/scripts/verify-release-manifest.sh (`make verify-release`,
+      # pre-push) and .github/workflows/release-verify.yml (tag-triggered,
+      # post-push, where the tag is guaranteed reachable by construction).
       - uses: actions/checkout@v4
+      - name: Configure git identity (fixture git commits need one)
+        # claude-workflow-plugin-h2zz, R1-F3 correction (independent review,
+        # dual-family sol-codex). Fixture helpers across this tier --
+        # design-conform.test.sh, design-rollup.test.sh, design-coherence.
+        # test.sh, design-unit-align.test.sh and design-rollup-incoherent.
+        # test.sh's shared `checkpoint_git` (each `git add -A && git commit`,
+        # wrapped in `|| true`), plus L2's upgrade-gate-compat.sh's bare
+        # `git add`/`git commit` calls at its docs/reviews and docs/specs
+        # checkpoints -- run with no per-call identity override. A bare
+        # ubuntu-latest runner has no configured user.email/user.name and no
+        # resolvable hostname, so git refuses ("fatal: unable to auto-detect
+        # email address") and the `|| true` swallows it: the checkpoint
+        # silently never commits, and later sections that depend on that git
+        # state fail in ways that look unrelated.
+        #
+        # WHY PLAIN `--global` WAS WRONG for the two fixtures it was actually
+        # wrong for. claude-workflow-plugin-h2zz, R2-F2 correction
+        # (independent review, dual-family sol-codex): all five
+        # checkpoint_git fixtures EXPORT HOME to a fresh, empty, per-run
+        # tmpdir before their own checkpoint commits, but grepping for that
+        # export alone overclaimed which ones it actually breaks. Verified
+        # directly, reading each fixture's own setup: design-conform.test.sh
+        # and design-unit-align.test.sh reassign HOME with NO local identity
+        # ever configured -- these two are the ones plain `--global` could
+        # not reach. design-coherence.test.sh:156, design-rollup.test.sh:199
+        # and design-rollup-incoherent.test.sh:146 all run `git init -q &&
+        # git config user.email ... && git config user.name ...` (no
+        # `--global`, i.e. REPOSITORY-LOCAL, written into the fixture's own
+        # `.git/config`) BEFORE `bd init` and before HOME is ever reassigned.
+        # Reassigning HOME cannot hide `.git/config` (it is found via the
+        # repo's own .git directory, never via $HOME), and local config
+        # always outranks global in git's own resolution order regardless of
+        # which mechanism sets the global half -- so these three were never
+        # vulnerable to what this step fixes, with or without it. Independent
+        # review corroborated this from the PRE-FIX 569174e CI transcript:
+        # those three PASSED (55, 73 and 13 assertions respectively) while
+        # the two above failed, on the exact same red run.
+        #
+        # `git config --global` reads and writes whatever $HOME/.gitconfig
+        # resolves to AT THE MOMENT git runs -- verified directly: with a
+        # real global identity already configured, `HOME=/var/empty git
+        # config --global --get user.email` still exits 1. So the first
+        # version of this step wrote identity under the JOB's own $HOME,
+        # which design-conform.test.sh's and design-unit-align.test.sh's OWN
+        # git operations never see once they reassign HOME -- an A/B test
+        # comparing "identity absent" against that first fix was comparing
+        # two arms BOTH invisible to the system under test for exactly those
+        # two files, which is why it read byte-identical in both arms for
+        # them. That result said nothing about whether identity was the
+        # cause for either; it said the experiment never ran.
+        #
+        # THE FIX: GIT_CONFIG_GLOBAL (git >= 2.32), not plain `--global`.
+        # Once exported, this is an EXPLICIT path git consults for "the"
+        # global config REGARDLESS of what HOME later becomes -- verified
+        # directly, in the exact order design-conform.test.sh and design-
+        # unit-align.test.sh use (write identity, export GIT_CONFIG_GLOBAL,
+        # THEN reassign HOME, THEN commit): the commit still succeeds.
+        # Exported via GITHUB_ENV so every later step in this job inherits
+        # it, including every spec run-tests.sh launches as a subprocess --
+        # one job-level fix covers those two fixtures (and any future one
+        # that isolates HOME the same way, WITHOUT also configuring its own
+        # local identity first) without needing to enumerate them. Kept for
+        # the other three too: it is additive, never a behaviour change,
+        # since their own local config always wins regardless.
+        #
+        # Directly reproduced in an ubuntu:24.04 container, both halves: the
+        # bare `git commit` failure with the exact message above when no
+        # identity is visible, and — with GIT_CONFIG_GLOBAL exported before
+        # HOME is reassigned — checkpoint_git's own `git add -A && git
+        # commit --allow-empty` sequence succeeding (rc=0, a genuine second
+        # commit landed) under the SAME HOME-isolated shape these fixtures
+        # use, where it previously silently no-opped.
+        #
+        # THE A/B WAS RE-RUN with this corrected setup, not merely re-argued
+        # from the flawed one: design-conform.test.sh and design-unit-
+        # align.test.sh, identity genuinely absent (no GIT_CONFIG_GLOBAL at
+        # all, global config unset) vs. GIT_CONFIG_GLOBAL correctly
+        # configured, same ubuntu:24.04 container, same commit. Measured:
+        # `bash design-conform.test.sh` — 84 FAIL: lines before, 2 after;
+        # `bash design-unit-align.test.sh` — 4 FAIL: lines before, 0 after
+        # (64/64, rc=0). 82 of design-conform's 84 original failures and ALL
+        # 4 of design-unit-align's were the identity defect. The earlier
+        # "second, undiagnosed Linux-only failure mode, ~84 assertions,
+        # several about '1c82's defect shape'" claim for design-conform.
+        # test.sh does NOT hold — it was built on the SAME flawed (identity-
+        # invisible-in-both-arms) A/B this correction replaces, and every
+        # one of the "1c82"-shaped failures it cited (19.4c/19.4d and
+        # siblings) is GONE in the corrected AFTER run: they were identity-
+        # caused too, cascading through the fixture's later git state, not a
+        # second gap in the denylist logic commit 326deeb fixed. The real
+        # residual is narrower and different in kind: exactly 2 failures
+        # (9.2d, 9.2e — a MUTANT-test leg for qa-gate.sh's REBIND-GATE
+        # sentinel region, `design-unit-bind`'s silent-rebind detection;
+        # unrelated to git identity, to dolt, or to "1c82"). design-unit-
+        # align.test.sh has NO residual failure mode at all — the identity
+        # defect was the entire explanation for its 4. Both corrections
+        # remain out of scope for THIS task (neither is one of the eight
+        # named fixes), now attributed to the correct, narrower cause rather
+        # than the wrong, broader guess the flawed A/B produced.
+        #
+        # Grepped the suite first for a spec that depends on identity
+        # being ABSENT (a test of the failure path itself): none exists --
+        # the specs that care already isolate themselves LOCALLY, either via
+        # a per-repo `git config` (qa-gate-baseline.sh:63-66, whose own
+        # comment already names "the global identity being absent in
+        # containerised CI environments" as the alternative it chose not to
+        # take) or a per-invocation `git -c user.email=...` override
+        # (upgrade-gate-compat.sh:215-216) -- both of which WIN over
+        # GIT_CONFIG_GLOBAL too (local repo config and `-c` overrides both
+        # outrank the global file in git's own resolution order), so this
+        # remains additive, not a behaviour change for anything already
+        # isolated.
+        run: |
+          GIT_ID_CONFIG="$RUNNER_TEMP/git-identity.gitconfig"
+          git config --file "$GIT_ID_CONFIG" user.email "ci@example.com"
+          git config --file "$GIT_ID_CONFIG" user.name "ci"
+          echo "GIT_CONFIG_GLOBAL=$GIT_ID_CONFIG" >> "$GITHUB_ENV"
+      - name: Install bd (Beads CLI) — pinned release, checksum-verified
+        # a9hh: five L1 specs (233 assertions, review-separation's 60-strong
+        # separation guard included) need the real bd and used to skip-with-
+        # log in CI, which the old runner scored as PASSED. Pinned to the
+        # exact version dev machines run (1.1.2) and verified against the
+        # release digest, so a moved tag or a tampered tarball fails loudly
+        # here instead of executing.
+        #
+        # /usr/local/bin IS LOAD-BEARING, not a default. installer-flags.test.sh
+        # probes a deliberately prereq-hostile PATH of
+        # /usr/bin:/bin:/usr/sbin:/sbin and skips three positive-control
+        # sections if bd resolves under it. Installing into /usr/bin would
+        # therefore trade five specs' coverage for three sections' — silently,
+        # before STRICT_SECTIONS existed.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/beads.tar.gz \
+            "https://github.com/steveyegge/beads/releases/download/v1.1.2/beads_1.1.2_linux_amd64.tar.gz"
+          echo "a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2  /tmp/beads.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/beads.tar.gz -C /usr/local/bin bd
+          bd version
+      - name: Install dolt — pinned release, checksum-verified
+        # claude-workflow-plugin-h2zz: model-roles.test.sh, runner-
+        # completeness.test.sh and workflow-doctor.test.sh each skip a
+        # section that queries the embedded store directly via
+        # `dolt sql -q "SELECT hashof('HEAD')"`. bd bundles an embedded
+        # engine for its own ordinary CRUD (which is why every other
+        # bd-dependent spec above already passes without this step), but
+        # these sections specifically need the raw `dolt` binary on PATH to
+        # query the store bd built. Same discipline as the bd step just
+        # above: pinned version, verified against the release digest, so a
+        # moved tag or a tampered tarball fails loudly here instead of
+        # executing. Installed to /usr/local/bin for the same PATH-ordering
+        # reason as bd (ahead of anything the image might otherwise resolve),
+        # though unlike bd there is no prereq-hostile-PATH spec depending on
+        # dolt being ABSENT from a narrower PATH to skip a positive control —
+        # checked; installer-flags.test.sh's hostile-PATH probe is about bd
+        # only.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/dolt.tar.gz \
+            "https://github.com/dolthub/dolt/releases/download/v2.3.5/dolt-linux-amd64.tar.gz"
+          echo "c49d4c3e004cf1581ba0d4a00c5023a26f84eb2ec15d5fe876eed36d5343f463  /tmp/dolt.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/dolt.tar.gz -C /usr/local/bin --strip-components=2 dolt-linux-amd64/bin/dolt
+          dolt version
+      - uses: actions/setup-node@v4
+        with:
+          # For BOTH MCP servers' deps below (engines: node >=18.17). Same
+          # LTS the L3 jobs pin.
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: |
+            .claude/mcp/bd-mcp/package-lock.json
+            .claude/mcp/code-graph-mcp/package-lock.json
+      - name: Install bd-mcp deps (mcp-unestablished-results.test.sh)
+        # Without node_modules the spec whole-file-skips, and since a9hh a
+        # skip fails the tier (SKIP IS NOT A PASS) — so CI provisions what
+        # the spec needs instead of green-lighting its absence.
+        run: npm ci
+        working-directory: .claude/mcp/bd-mcp
+      - name: Install code-graph-mcp deps (impact-report.test.sh section 4)
+        # a9hh R1-F1. The step above provisioned one of two MCP servers, and
+        # the tier went green over the other: impact-report.test.sh executed
+        # 24 of 39 assertions, printing `SKIPPED: section 4 (code-graph-mcp
+        # not installed ...)`, under a `Total: 36  Passed: 36  Failed: 0
+        # Skipped: 0` / floor-HELD summary, rc=0. Section 4 is the LIVE
+        # code-graph path — server=code-graph, exit-0-despite-one-per-file-
+        # error, the non-git relativisation fallback — i.e. the live half of
+        # the artifact `qa-gate.sh approve` refuses to run without.
+        # 94 packages, no install scripts, no native builds (sql.js and
+        # web-tree-sitter are WASM), ~45M.
+        run: npm ci
+        working-directory: .claude/mcp/code-graph-mcp
       - name: Verify dependencies
+        # Fail HERE, naming the missing thing, rather than three minutes later
+        # as a section skip inside a spec. The two node_modules checks are the
+        # cheap guard on the two steps above actually having done something.
         run: |
           jq --version
           bash --version | head -1
+          bd version
+          dolt version
+          node --version
+          for d in bd-mcp code-graph-mcp; do
+            if [ ! -d ".claude/mcp/$d/node_modules" ]; then
+              echo "MISSING: .claude/mcp/$d/node_modules — the npm ci step for it did not run or did not land." >&2
+              echo "  Specs keyed on it would skip, and STRICT_SECTIONS=1 would fail the suite in a less obvious place." >&2
+              exit 1
+            fi
+          done
       - name: Run L1 suite
+        # STRICT_SECTIONS=1 comes from the job env above: in THIS environment a
+        # spec that skips a section fails the tier.
         run: bash .claude/scripts/tests/run-tests.sh
+
+  # ---------------------------------------------------------------------------
+  # L1 — bd 1.3.0 leg, one member of workflow-doctor's
+  # DOCTOR_BD_SCHEMA_VALIDATED (claude-workflow-plugin-we57/0cr6) — see the job
+  # body below for why this is a separate job rather than a matrix leg of
+  # l1-unit above. Its id says "max" because 1.3.0 was the set's ceiling when
+  # this job was written; since claude-workflow-plugin-wyt3 added 1.3.1:66, the
+  # ceiling is l1-doctor-bd-1-3-1 below. The id is kept, not renamed, because
+  # README, CHANGELOG and workflow-doctor.sh refer to it.
+  # ---------------------------------------------------------------------------
+  l1-doctor-bd-max:
+    name: L1 — workflow-doctor (bd 1.3.0)
+    runs-on: ubuntu-latest
+    # Exercises the 1.3.0:66 member of workflow-doctor.sh's
+    # DOCTOR_BD_SCHEMA_VALIDATED set (claude-workflow-plugin-we57/0cr6) — the
+    # set's ceiling until 1.3.1:66 joined it. l1-unit above pins the FLOOR
+    # (bd 1.1.2) on every run; before this job, 1.3.0:66 could honestly be
+    # described only as "the development host's own bd" — measured, but
+    # exercised by no suite. This job is that suite, for exactly the claim the
+    # set makes.
+    #
+    # WHY A SEPARATE, NARROW JOB RATHER THAN A MATRIX LEG OF l1-unit ABOVE. bd
+    # 1.3.0 is not a drop-in replacement for 1.1.2 across everything this tier
+    # depends on: we57's own investigation found bd's actor attribution
+    # missing from `bd comment`/`update`/`close` output on 1.3.0 (claude-
+    # workflow-plugin-u443, unresolved as of this job), and several OTHER L1
+    # specs assert on that attribution. Matrixing l1-unit itself over both bd
+    # versions would make THIS task's coverage indistinguishable from u443's
+    # pre-existing, separately-tracked gap, and would block merges on
+    # behaviour this task does not touch. So this job installs bd 1.3.0 and
+    # runs ONLY workflow-doctor.test.sh — the one file whose behaviour the
+    # 1.3.0:66 member's validity claim is about — leaving l1-unit's full-tier
+    # run on the 1.1.2 floor untouched. If u443 is resolved later, revisit
+    # whether this should widen into a matrix leg of l1-unit instead.
+    #
+    # dolt stays pinned at 2.3.5 — the SAME release l1-unit installs, not a
+    # second pin to maintain. A `SELECT MAX(version) FROM schema_migrations`
+    # is a read of bd's own on-disk table, not a dolt-CLI-version-sensitive
+    # operation: verified directly, not assumed — a store built with bd 1.3.0
+    # + dolt 2.3.0 read back with dolt 2.3.5 still reports schema 66.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git identity (fixture git commits need one)
+        # Same defect and same fix as l1-unit's identical step above — see
+        # that step's comment for the full R1-F3/R2-F2 account (which
+        # fixtures need it, why GIT_CONFIG_GLOBAL rather than plain
+        # --global, and the corrected A/B that proved it).
+        # workflow-doctor.test.sh's own mk_target() is one of the fixtures
+        # that needs it: `git init` + an allow-empty commit, no local
+        # identity configured first.
+        run: |
+          GIT_ID_CONFIG="$RUNNER_TEMP/git-identity.gitconfig"
+          git config --file "$GIT_ID_CONFIG" user.email "ci@example.com"
+          git config --file "$GIT_ID_CONFIG" user.name "ci"
+          echo "GIT_CONFIG_GLOBAL=$GIT_ID_CONFIG" >> "$GITHUB_ENV"
+      - name: Install bd (Beads CLI) — 1.3.0, pinned release, checksum-verified
+        # The 1.3.0:66 member of DOCTOR_BD_SCHEMA_VALIDATED (workflow-doctor.sh;
+        # its ceiling until claude-workflow-plugin-wyt3 added 1.3.1:66) and
+        # the development host's own bd as of claude-workflow-plugin-we57/
+        # 0cr6. Same discipline as l1-unit's bd (floor) step above: pinned
+        # tarball, verified against the published release digest
+        # (github.com/steveyegge/beads/releases/download/v1.3.0/checksums.txt,
+        # cross-checked against an independent `sha256sum` of the downloaded
+        # tarball on 2026-09-28), so a moved tag or a tampered tarball fails
+        # loudly here instead of executing.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/beads.tar.gz \
+            "https://github.com/steveyegge/beads/releases/download/v1.3.0/beads_1.3.0_linux_amd64.tar.gz"
+          echo "2f92b904ecf35b607e44dc5c39229173af69c54f1183e8d709f1773540cdcf3b  /tmp/beads.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/beads.tar.gz -C /usr/local/bin bd
+          bd version
+      - name: Install dolt — pinned release, checksum-verified
+        # Identical pin, checksum and binary to l1-unit's own dolt step
+        # above — see that step's comment for the full reasoning. Repeated
+        # rather than factored out: this workflow has no composite-action or
+        # reusable-step mechanism in use elsewhere, so each job's
+        # provisioning stays legible on its own rather than depending on one.
+        run: |
+          curl -fsSL --retry 3 -o /tmp/dolt.tar.gz \
+            "https://github.com/dolthub/dolt/releases/download/v2.3.5/dolt-linux-amd64.tar.gz"
+          echo "c49d4c3e004cf1581ba0d4a00c5023a26f84eb2ec15d5fe876eed36d5343f463  /tmp/dolt.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/dolt.tar.gz -C /usr/local/bin --strip-components=2 dolt-linux-amd64/bin/dolt
+          dolt version
+      - name: Run workflow-doctor.test.sh (bd 1.3.0)
+        # NOT run-tests.sh, and no node/MCP-server provisioning: this job
+        # exists to exercise ONE claim (1.3.0:66 is a validated pair) rather
+        # than to re-run the whole L1 tier a second time under a bd version
+        # this tier is not yet fully vetted against (see the job header
+        # above, u443). Sections of this file that need node (e.g. METATEST
+        # 4's mcp_bd leg) SKIP gracefully here, exactly as they do on a
+        # laptop without those servers installed — that degradation is this
+        # file's own designed behaviour, not a gap this job introduces, and
+        # STRICT_SECTIONS is deliberately not set for the same reason.
+        run: bash .claude/scripts/tests/workflow-doctor.test.sh
+
+  # ---------------------------------------------------------------------------
+  # L1 — bd 1.3.1 lane (claude-workflow-plugin-wyt3). ADDED ALONGSIDE the
+  # 1.3.0 lane above, not in place of it.
+  #
+  # The rule: every member of DOCTOR_BD_SCHEMA_VALIDATED is exercised by its
+  # OWN lane. A pair in the set that no lane runs is a claim without an
+  # artifact. Replacing the 1.3.0 lane would have left 1.3.0:66 in the set with
+  # nothing exercising it — or forced dropping it and failing the doctor on
+  # every machine running 1.3.0. Both releases writing schema 66 does not make
+  # either redundant: same schema is not same behaviour.
+  #
+  # COUPLED WITH ITS PAIR. This lane and the 1.3.1:66 entry land in the same
+  # commit and are kept only if EVERY tier passes on them in the same run; if
+  # this lane fails anything, the lane and the pair are reverted together.
+  #
+  # PIN VERIFIED TWO WAYS, not one: the sha256 below is the value in the
+  # v1.3.1 release's own published checksums.txt AND the digest of an
+  # independently downloaded copy of the asset (2026-10-03). Both agree.
+  # Why 1.3.1 at all: it is what a fresh `curl | bash` beads install lands on
+  # today, so it is what a new teammate will actually have.
+  # ---------------------------------------------------------------------------
+  l1-doctor-bd-1-3-1:
+    name: L1 — workflow-doctor (bd 1.3.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure git identity (fixture git commits need one)
+        run: |
+          GIT_ID_CONFIG="$RUNNER_TEMP/git-identity.gitconfig"
+          git config --file "$GIT_ID_CONFIG" user.email "ci@example.com"
+          git config --file "$GIT_ID_CONFIG" user.name "ci"
+          echo "GIT_CONFIG_GLOBAL=$GIT_ID_CONFIG" >> "$GITHUB_ENV"
+      - name: Install bd (Beads CLI) 1.3.1 — pinned release, checksum-verified
+        run: |
+          curl -fsSL --retry 3 -o /tmp/beads.tar.gz \
+            "https://github.com/steveyegge/beads/releases/download/v1.3.1/beads_1.3.1_linux_amd64.tar.gz"
+          echo "3219443a9734b89b93fb16ee8d65844759fa1b3cd3cf139c606b7353cfb0715c  /tmp/beads.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/beads.tar.gz -C /usr/local/bin bd
+          bd version
+      - name: Install dolt — pinned release, checksum-verified
+        run: |
+          curl -fsSL --retry 3 -o /tmp/dolt.tar.gz \
+            "https://github.com/dolthub/dolt/releases/download/v2.3.5/dolt-linux-amd64.tar.gz"
+          echo "c49d4c3e004cf1581ba0d4a00c5023a26f84eb2ec15d5fe876eed36d5343f463  /tmp/dolt.tar.gz" | sha256sum -c -
+          sudo tar -xzf /tmp/dolt.tar.gz -C /usr/local/bin --strip-components=2 dolt-linux-amd64/bin/dolt
+          dolt version
+      - name: Run workflow-doctor.test.sh (bd 1.3.1)
+        run: bash .claude/scripts/tests/workflow-doctor.test.sh
 
   # ---------------------------------------------------------------------------
   # L2 — component tier. Hook-pipeline tests with crafted stdin envelopes.
@@ -112,6 +691,27 @@ jobs:
           # fixture from the v3.5.0 tag (git archive), and the default
           # shallow single-branch checkout has no tags to archive.
           fetch-depth: 0
+      - name: Configure git identity (fixture git commits need one)
+        # claude-workflow-plugin-h2zz, R1-F3 correction. Same defect as
+        # l1-unit's identical step above, same fix, same reasoning -- see
+        # that step's comment for the full account (which specs are
+        # affected, why GIT_CONFIG_GLOBAL rather than plain `--global` is
+        # required to survive a fixture reassigning HOME, and why it is
+        # additive rather than a behaviour change for specs that already
+        # isolate themselves locally). This job's own installer-v3-
+        # upgrade.sh and upgrade-gate-compat.sh fixtures build git repos at
+        # run time the same way the L1 tier's design-*.test.sh fixtures do
+        # -- checked directly: neither overrides HOME, so plain `--global`
+        # was never wrong for THIS job specifically, but GIT_CONFIG_GLOBAL
+        # is strictly more robust (covers this job's fixtures today and any
+        # future one that isolates HOME the way the L1 fixtures do) and
+        # keeps both jobs' identity steps identical rather than diverging
+        # for a distinction that may not hold tomorrow.
+        run: |
+          GIT_ID_CONFIG="$RUNNER_TEMP/git-identity.gitconfig"
+          git config --file "$GIT_ID_CONFIG" user.email "ci@example.com"
+          git config --file "$GIT_ID_CONFIG" user.name "ci"
+          echo "GIT_CONFIG_GLOBAL=$GIT_ID_CONFIG" >> "$GITHUB_ENV"
       - name: Verify dependencies
         run: |
           jq --version

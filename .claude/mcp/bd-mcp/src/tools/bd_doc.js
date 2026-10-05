@@ -42,10 +42,14 @@ import { z } from 'zod';
 import {
     runBd,
     runBdJson,
+    runBdShowJson,
     BdError,
     validateTaskId,
     HINT_LIST_TO_FIND_IDS,
     normalizeShowResult,
+    resolveComments,
+    commentsUnavailableError,
+    COMMENTS_UNAVAILABLE,
 } from '../lib/exec-bd.js';
 import { ok, fail, safe } from '../lib/format.js';
 
@@ -161,7 +165,13 @@ export function registerDocTools(server) {
 
             // Named doc: figure out the next version, then append a comment
             // with the sentinel header.
-            const showRaw = await runBdJson(['show', tid, '--json'], {
+            //
+            // includeComments is load-bearing: named docs ARE comments, so on
+            // bd 1.1.2 a plain show returns none and every write would compute
+            // nextVersion=1 — silently forking the version chain instead of
+            // extending it.
+            const showRaw = await runBdShowJson(tid, {
+                includeComments: true,
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });
@@ -171,7 +181,24 @@ export function registerDocTools(server) {
                     new BdError(`Task '${tid}' not found`, { hint: HINT_LIST_TO_FIND_IDS }),
                 );
             }
-            const existing = indexDocsFromComments(task.comments || []);
+            // fkm.1.18. This read is the version chain's ONLY input, so a blind
+            // one is worse here than anywhere else: it computes nextVersion=1
+            // over an existing chain and appends a duplicate v1, FORKING the
+            // history instead of extending it — and bd_doc_read's latest-by-
+            // version lookup then has two candidates and no way to order them.
+            // Refuse rather than write on an unestablished read.
+            const resolvedWrite = resolveComments(task);
+            if (resolvedWrite.status === COMMENTS_UNAVAILABLE) {
+                return fail(
+                    commentsUnavailableError(
+                        tid,
+                        resolvedWrite,
+                        `to determine the next version of doc '${name}'; writing without them would ` +
+                            `append a duplicate v1 and fork the version chain`,
+                    ),
+                );
+            }
+            const existing = indexDocsFromComments(resolvedWrite.comments);
             const prev = existing.get(name);
             const nextVersion = prev ? prev.version + 1 : 1;
 
@@ -248,7 +275,12 @@ export function registerDocTools(server) {
         safe(async (input) => {
             const tid = validateTaskId(input.task_id);
 
-            const raw = await runBdJson(['show', tid, '--json'], {
+            // includeComments is load-bearing: named docs are stored AS
+            // comments, so without it bd_doc_read reports every named doc as
+            // missing on bd 1.1.2 (the 'main' doc, which lives in .notes,
+            // would still resolve — making the failure look selective).
+            const raw = await runBdShowJson(tid, {
+                includeComments: true,
                 cwd: input.cwd,
                 hintOnError: HINT_LIST_TO_FIND_IDS,
             });
@@ -259,10 +291,30 @@ export function registerDocTools(server) {
                 );
             }
 
-            const named = indexDocsFromComments(task.comments || []);
+            // fkm.1.18. Named docs ARE comments, so an unreadable comment
+            // stream makes every named doc look MISSING — and `list_only`
+            // reported that as a cheerful "0 doc(s) attached", which is the
+            // same well-formed lie the bug was filed for. The refusal is
+            // scoped to the branches that actually consume comments: a
+            // `main` read comes from .notes and stays available, so a
+            // specialist can still load the SPEC when the comment transport
+            // is degraded.
+            const resolvedRead = resolveComments(task);
+            const commentsUnreadable = resolvedRead.status === COMMENTS_UNAVAILABLE;
             const mainContent = task.notes || '';
 
             if (input.list_only) {
+                if (commentsUnreadable) {
+                    return fail(
+                        commentsUnavailableError(
+                            tid,
+                            resolvedRead,
+                            'to enumerate the named docs stored as comments; listing without them ' +
+                                'would report every named doc as absent',
+                        ),
+                    );
+                }
+                const named = indexDocsFromComments(resolvedRead.comments);
                 const meta = [
                     ...(mainContent
                         ? [{ name: 'main', length: mainContent.length, storage: 'notes' }]
@@ -307,13 +359,28 @@ export function registerDocTools(server) {
                 );
             }
 
-            // Named doc.
+            // Named doc — from here down every branch reads the comment stream,
+            // so an unestablished read must refuse instead of reporting the doc
+            // as "not found" (fkm.1.18: absent and unreadable must not collapse
+            // to the same answer).
+            if (commentsUnreadable) {
+                return fail(
+                    commentsUnavailableError(
+                        tid,
+                        resolvedRead,
+                        `to locate doc '${name}', which is stored as a comment; without them a ` +
+                            `present doc is indistinguishable from a missing one`,
+                    ),
+                );
+            }
+            const named = indexDocsFromComments(resolvedRead.comments);
+
             if (input.version !== undefined) {
                 // Need to find the matching version from history. We have all
                 // versions in the comments list — re-scan instead of using the
                 // index map (which only kept the latest).
                 let chosen = null;
-                for (const c of task.comments || []) {
+                for (const c of resolvedRead.comments) {
                     const text = c.text || c.body || '';
                     const m = DOC_HEADER_RE.exec(text);
                     if (!m) continue;

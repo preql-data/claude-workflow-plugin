@@ -1,0 +1,71 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-xsu1",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "076682e846d9d9bb77b31ca81ff545dc6687b6f6af032508c1367545df39bf2f",
+  "risk_threshold": "high",
+  "stop_condition": "every path to parallel_safe:true enumerated; dependency/cycle handling, canonicality, determinism, the graph-degradation qualifier, both new accessors, and all five mutant anchors adjudicated",
+  "verdict": "findings",
+  "iterations": 1,
+  "stopped_by": "verdict",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/epic-gate.sh:1039 (and :1042-1045, emission at :1134)",
+      "evidence": "Dependencies on UNRESOLVED units are deliberately deleted. With the artifact declaring `U2 depends_on U1` but only U2 bound to a child task, :1042-1045 produce r:[\"U2\"] and ud_r:{\"U2\":[]} — the dependency is dropped rather than treated as unsatisfied. U2 then becomes ready for batch 1 and :1134 emits parallel_safe:true. Confirmed by a targeted jq probe reproducing that exact transformation.",
+      "description": "Emits an established-safe plan that schedules a unit before its declared dependency exists, directly violating docs/plans/v5-design-phase.md:158 ('the orchestrator emits batches respecting dependency order'). An unbound dependency is missing information, not an absent dependency — it must degrade, not silently resolve."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": ".claude/scripts/epic-gate.sh:1053 and :1055, plus :1036, :1122; emission at :1134",
+      "evidence": "Several jq failures STILL FAIL OPEN into parallel_safe:true. Most sharply, a failure extracting .ud_r at :1055 substitutes {}, which erases EVERY dependency — after which disjoint U1/U2 co-batch despite U2 depends_on U1. :1036, :1053 and :1122 likewise replace a failed computation with an empty map/set/batches and continue to the single true emission at :1134. Verified by control-flow reading. Mutant 2 faults only the main jq call at :1108, so it does not reach any of these surviving wrappers.",
+      "description": "This is the exact class the brief named as lethal — 'a set difference that did not compute must never read as an empty one' — surviving in four places, with the mutant written to catch it structurally unable to reach them. Every one of these must check rc AND shape and refuse set_computation_failed."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "high",
+      "location": ".claude/scripts/epic-gate.sh:936 (canonicality gate)",
+      "evidence": "The gate permits CASE ALIASES. A direct probe confirmed both `src/A.js` and `src/a.js` are accepted as canonical; byte-equality intersection then treats them as disjoint. On a case-insensitive worktree (this host's default APFS) they identify the same file, so two units declaring those spellings co-batch under parallel_safe:true. The regex is otherwise correct — it does catch absolute paths, `.`/`..` segments, `//` and trailing `/`.",
+      "description": "An established-safe plan with two writers in one file. The implementer's reasoning for not handling case was that Linux CI has case-sensitive filesystems where the two names ARE different files — true, but it does not follow that nothing should be done: a host-sensitive check, or conservative degradation on case-COLLIDING declarations, is safe on both platforms. Degrade-instead-of-normalise remains the right overall choice; the omission is specifically the collision case."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "medium",
+      "location": ".claude/scripts/epic-gate.sh:1036 (unit_task_map), degraded path :694-714",
+      "evidence": "Clean output is not deterministic from artifact order alone: unit_task_map preserves Beads child ENUMERATION order, so reversing two otherwise-identical bound pairs changes the serialized key order from {\"U2\":...,\"U1\":...} to {\"U1\":...,\"U2\":...}. Confirmed by a targeted jq probe. Batches themselves remain artifact-ordered, but stdout and the cache bytes change. The degraded path at :694-714 likewise preserves child enumeration order.",
+      "description": "The determinism requirement is that the plan is a function of artifact order. Here the envelope is also a function of bd's row order, so two runs over an unchanged artifact can differ in bytes — which defeats byte-comparison verification and makes the cache's identity unstable for no reason."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "medium",
+      "location": ".claude/scripts/epic-gate.sh:984 (PLAN-BATCHES-CHILD-BINDING-GATE sentinel)",
+      "evidence": "The gate is genuinely load-bearing for guards 9-11, but the claim that it is the ONLY check without a redundant downstream backup is FALSE. Verified by downstream control-flow reading: removing guard 12 lets `from_entries` silently retain one of two tasks bound to the same unit; removing guard 13 permits lexical aliases; removing epic_has_no_children lets a valid design with no children reach an empty parallel_safe:true plan. Each of those is also unbacked.",
+      "description": "Mutant 3 protects a real check, so it is not vacuous — but the reasoning that selected it does not hold, which means three other unbacked guards currently have no discriminating mutant at all. The remedy is more sentinels, not a different one."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/plan-batches.test.sh:348 and :353",
+      "evidence": "The determinism SENSITIVITY leg does not prove the plan changed. The positive arm permits U3 to share a batch with EITHER U1 or U2, while :353 asserts only that the reordered artifact puts U3 with U2. An implementation that always prioritises U2 regardless of artifact order satisfies both assertions simultaneously.",
+      "description": "A vacuous sensitivity control — it cannot distinguish 'artifact order is the input' from 'U2 is always preferred'. Fix by anchoring the original composition (U3-with-U1) or by comparing normalised batch composition across the two artifacts directly."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "medium",
+      "location": ".claude/scripts/epic-gate.sh:729 vs the contract at :70 and docs/HOOKS.md:2582; codified by plan-batches.test.sh:587",
+      "evidence": "The jq-absence path emits a complete degraded envelope but EXITS 2, contradicting this subcommand's documented 'always exits 0' contract at :70 and docs/HOOKS.md:2582. Under the house consumer idiom `$(cmd || echo '{}')` that yields TWO JSON objects concatenated rather than one — confirmed by a targeted bash probe. plan-batches.test.sh:587 currently asserts the contradictory exit code, so the test pins the defect.",
+      "description": "A consumer following the documented idiom gets unparseable output precisely when the tool is trying to report its own degradation. Either exit 0 as the contract states, or change the contract and every consumer — but the test must not codify the contradiction."
+    },
+    {
+      "id": "R1-F8",
+      "severity": "low",
+      "location": ".claude/scripts/epic-gate.sh:686 present; :736, :747, :754 missing",
+      "evidence": "The graph-degradation qualifier (graph_intersection_computed / graph_degradation_reason) is present on the normal and degraded _pb_finish output and on the jq-free literal, but NOT on every emission path as claimed: the envelope-construction fallback and the usage-error JSON at :736, :747 and :754 omit both fields.",
+      "description": "An envelope-consistency defect rather than an unsafe true path — the actual computed batch readouts do name the file-set-only scope, which is what docs/plans/v5-design-phase.md:158 requires. But the claim that the fields are on every path was checked and is not true, so a consumer keying on graph_intersection_computed sees it absent on three paths."
+    }
+  ]
+}

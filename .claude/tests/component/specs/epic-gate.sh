@@ -24,12 +24,12 @@ bd_create_id() {
 
 # 1. Seed: epic with 2 sub-tasks (no QA labels yet).
 EPIC=$(bd_create_id "Epic parent" -t epic -p 1)
-assert_match "epic-gate: epic created" '^[a-z0-9-]+\.' "$EPIC"
+assert_match "epic-gate: epic created" "$BD_ID_RE" "$EPIC"
 
 SUB1=$(bd_create_id "Sub task 1" -t task -p 1 --deps "parent-child:$EPIC")
 SUB2=$(bd_create_id "Sub task 2" -t task -p 1 --deps "parent-child:$EPIC")
-assert_match "epic-gate: sub1 created" '^[a-z0-9-]+\.' "$SUB1"
-assert_match "epic-gate: sub2 created" '^[a-z0-9-]+\.' "$SUB2"
+assert_match "epic-gate: sub1 created" "$BD_ID_RE" "$SUB1"
+assert_match "epic-gate: sub2 created" "$BD_ID_RE" "$SUB2"
 
 # 2. check on an epic with two open sub-tasks (no QA labels) -> defer
 # (the "other" bucket / open sub-tasks).

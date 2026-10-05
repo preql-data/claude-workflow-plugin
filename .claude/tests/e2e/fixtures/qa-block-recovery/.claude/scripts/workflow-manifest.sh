@@ -43,6 +43,19 @@
 #       Paths are relative to <source-root> (e.g. .claude/agents/qa.md).
 #       No header, no comments, no timestamps.
 #
+#   governing <source-root>
+#       Sorted TSV on stdout, one row per GOVERNING ARTIFACT:
+#           <path><TAB><origin>
+#       No hashes, no hash tool required. See THE GOVERNING-ARTIFACT QUERY
+#       below for what "governing" means and who asks.
+#
+#   hash-file <path>
+#       Bare 64-lowercase-hex sha256 of ONE named file, over its RAW BYTES,
+#       on stdout. Refuses (exit 1, naming which) on a missing, unreadable or
+#       EMPTY path BEFORE hashing. This is the design-artifact binding's digest
+#       (v5 D1); it is not, and must never become, a second change-set
+#       canonicalisation — that is impact-report.sh --hash-only.
+#
 #   classify --target <dir> --source <dir> --old-table <file>
 #       Sorted TSV on stdout, one row per SOURCE-manifest entry:
 #           <path><TAB><class><TAB><verdict>
@@ -89,6 +102,22 @@ Usage: workflow-manifest.sh <subcommand> [options]
       sorted TSV, <path><TAB><class><TAB><sha256>, one row per shipped
       file, paths relative to <source-root>. Deterministic: no header,
       no timestamps, LC_ALL=C sort order.
+
+  governing <source-root>
+      Print the GOVERNING-ARTIFACT set for the tree at <source-root>:
+      sorted TSV, <path><TAB><origin>, paths relative to <source-root>.
+      Every shipped-surface path (origin = its manifest class) plus the
+      named runtime-contract files the plugin does not ship but whose
+      content governs how it behaves (origin = runtime-contract), plus the
+      design artifacts under docs/specs/ (origin = design-artifact).
+      No hashes, so no sha256 tool is needed.
+
+  hash-file <path>
+      Print the sha256 of <path> over its RAW BYTES: bare 64 lowercase hex,
+      no filename, no newline-normalisation, so `shasum -a 256 <path>`
+      reproduces it by hand. REFUSES before hashing when <path> is missing,
+      unreadable or empty — those digest to the sha256 of zero bytes, which
+      is valid-looking and constant, and would bind a gate to nothing.
 
   classify --target <dir> --source <dir> --old-table <file>
       Print an upgrade plan for the install at <dir> against the plugin
@@ -175,6 +204,26 @@ require_hash_tool() {
 # SUBSTITUTION subshell, not the script (LESSONS.md, 2026-06-12) — callers
 # therefore assign plainly (`h=$(hash_file "$f")`) so `set -e` propagates the
 # non-zero status, never wrapped in `|| true`.
+# THE ESCAPED-OUTPUT DECODE (claude-workflow-plugin-18fc). GNU coreutils and
+# perl's Digest::SHA both ESCAPE the output line when the filename contains a
+# backslash or a newline (coreutils also for a carriage return): the LINE is
+# prefixed with ONE backslash and the problematic bytes inside the NAME are
+# escaped. coreutils manual, "cksum output modes": "the line is started with a
+# backslash, and each problematic character in the file name is escaped with a
+# backslash ... any other backslash escape sequences are reserved for future
+# use" — so the marker is a single, line-level byte whose meaning does not
+# change as the trigger set grows. Field 1 therefore reads `\<64 hex>` = 65
+# chars, and this helper REFUSED a correct digest (design-artifact.test.sh 9.2
+# on Linux). The digest itself is never escaped, so decoding is exactly: drop
+# that one marker byte. It is applied unconditionally because a lowercase-hex
+# digest can never begin with a backslash — a no-op on unescaped output — and
+# the 64-char and hex guards below are untouched, so nothing new is accepted.
+#
+# Only the two arms that pass a path through a `<hash> <name>` formatter need
+# it. Apple's /sbin/sha256sum does not escape at all (which is the only reason
+# macOS passed), and openssl does not either: it prints the name RAW, so its
+# output can span lines for a newline-named file, and `${raw##* }` already
+# takes the LAST field — the hash — regardless.
 hash_file() {
     local f="$1"
     local raw=""
@@ -183,14 +232,16 @@ hash_file() {
         sha256sum)
             raw=$(sha256sum "$f" 2>/dev/null) || raw=""
             out="${raw%% *}"
+            out="${out#\\}"  # SHA256-ESCAPE-DECODE
             ;;
         shasum)
             raw=$(shasum -a 256 "$f" 2>/dev/null) || raw=""
             out="${raw%% *}"
+            out="${out#\\}"  # SHA256-ESCAPE-DECODE
             ;;
         openssl)
             # openssl 1.x prints "SHA256(f)= <hex>", 3.x "SHA2-256(f)= <hex>";
-            # the hash is the last field either way.
+            # the hash is the last field either way. No escaping — see above.
             raw=$(openssl dgst -sha256 "$f" 2>/dev/null) || raw=""
             out="${raw##* }"
             ;;
@@ -224,11 +275,23 @@ hash_file() {
 # A single file that is absent is simply omitted — a v3.5 tree has no
 # .claude/model-roles and that is not an error, it is the whole reason we
 # freeze a table per release.
+#
+# MANIFEST_EMIT_HASH=0 drops the third column and, with it, the entire hashing
+# dependency: `governing` needs the ENUMERATION, not the digests, and hashing
+# ~130 files to answer "is this path plugin-owned?" would put a sha256 tool on
+# the Stop hook's critical path for nothing. The hashed branch below is
+# untouched by that switch — byte-for-byte the statement that produced every
+# frozen table under manifests/ — so `generate` output cannot move with it.
+MANIFEST_EMIT_HASH=1
 emit_row() {
     local class="$1"
     local rel="$2"
     local h
     [ -f "$rel" ] || return 0
+    if [ "$MANIFEST_EMIT_HASH" = "0" ]; then
+        printf '%s\t%s\n' "$rel" "$class"
+        return 0
+    fi
     h=$(hash_file "$rel")
     printf '%s\t%s\t%s\n' "$rel" "$class" "$h"
 }
@@ -238,15 +301,36 @@ emit_row() {
 # nullglob is a per-shell setting and an unmatched glob would otherwise be
 # emitted literally. maxdepth is also what keeps .claude/scripts/tests/ out
 # of the .claude/scripts/*.sh surface.
+#
+# i8cx: a process substitution discards `find`'s own exit status structurally
+# — no pipefail scope can fix that, because there is no pipe here to scope; a
+# `< <(...)` consumer simply never observes the producer's rc. A `find` that
+# fails partway (permission denied on an entry, a signal) used to make this
+# loop silently process however many NUL-delimited names arrived before the
+# failure — a manifest silently MISSING rows, and a missing row verifies as
+# "unchanged" forever (install.sh --verify and the upgrade path both compare
+# against this table). scan_declared_dir below already carries the fix for
+# exactly this shape (added later, for the declared-directory scan); this is
+# the same listing-file-plus-explicit-rc pattern applied to the two callers
+# that never got it. NUL-delimited output additionally CANNOT be captured
+# through a bash variable (embedded NULs truncate a `$()` capture), so a
+# temp-file listing is the only channel that preserves both the delimiter and
+# an observable rc.
 scan_flat() {
     local class="$1"
     local dir="$2"
     local glob="$3"
-    local f
+    local f listing find_err find_rc=0
     [ -d "$dir" ] || return 0
+    mk_workdir
+    listing="$WORK_DIR/flat-scan.z"
+    find_err=$( { find "$dir" -maxdepth 1 -type f -name "$glob" -print0 >"$listing"; } 2>&1 ) || find_rc=$?
+    if [ "$find_rc" -ne 0 ]; then
+        die "scan_flat: could not ENUMERATE '$dir' (find exited $find_rc; find said: ${find_err:-<no diagnostic>}). A failed enumeration must not look like an empty (legitimately absent) one: it would ship a manifest silently missing rows, and a missing row verifies as 'unchanged' forever."
+    fi
     while IFS= read -r -d '' f; do
         emit_row "$class" "$f"
-    done < <(find "$dir" -maxdepth 1 -type f -name "$glob" -print0 2>/dev/null)
+    done < "$listing"
 }
 
 # scan_tree <class> <dir> [prune-dir-name...]
@@ -276,10 +360,20 @@ scan_tree() {
         args+=( ')' -prune -o )
     fi
     args+=( -type f '!' -name '*.log' -print0 )
-    local f
+    # i8cx: same fix as scan_flat above (see its header) — a process
+    # substitution cannot surface find's rc, and this scan is RECURSIVE, so a
+    # partial failure (e.g. an unreadable subdirectory under .claude/mcp)
+    # would silently drop rows even more plausibly than the flat case.
+    local f listing find_err find_rc=0
+    mk_workdir
+    listing="$WORK_DIR/tree-scan.z"
+    find_err=$( { find "$dir" "${args[@]}" >"$listing"; } 2>&1 ) || find_rc=$?
+    if [ "$find_rc" -ne 0 ]; then
+        die "scan_tree: could not ENUMERATE '$dir' (find exited $find_rc; find said: ${find_err:-<no diagnostic>}). A failed enumeration must not look like an empty (legitimately absent) one: it would ship a manifest silently missing rows, and a missing row verifies as 'unchanged' forever."
+    fi
     while IFS= read -r -d '' f; do
         emit_row "$class" "$f"
-    done < <(find "$dir" "${args[@]}" 2>/dev/null)
+    done < "$listing"
 }
 
 # ---------------------------------------------------------------------------
@@ -359,6 +453,311 @@ generate_manifest() {
     LC_ALL=C sort "$raw"
 }
 
+# GOVERNING-ARTIFACT-SURFACE BEGIN (claude-workflow-plugin-s5qf)
+#
+# THE GOVERNING-ARTIFACT QUERY
+# ----------------------------
+# WHO ASKS. `verify-before-stop.sh`'s `is_doc_only_path`, and nothing else
+# today. F1 — the doc-only fast path — auto-approves a change set with
+# `reviewed_by=none` when every path in it is documentation. The classifier
+# decides "documentation" from the file's NAME (`*.md`, `*.txt`, a bare
+# `LICENSE`), narrowed by an affirmative content veto that catches anything the
+# OS will execute (claude-workflow-plugin-bbh). An agent prompt, a rubric and a
+# lessons ledger are markdown, carry no exec bit and no `#!`, and so are
+# documentation to every check in that function.
+#
+# THEY ARE NOT DOCUMENTATION. They are executable policy in prose: the grader
+# reads `.claude/rubrics/*.md` as its criteria and `LESSONS.md` as criteria by
+# reference, the runtime reads `.claude/agents/*.md` as the agent, and
+# `.claude/skills/**/SKILL.md` is loaded and followed. `.md` eligibility for
+# these is the same category error `LICENSE.sh` was: a NAME asserting a content
+# type it does not have. bbh deleted two arms for inferring content type from a
+# path's shape; a `docs/specs/` arm, or a `.claude/agents/` arm, would be that
+# identical inference wearing a different suffix.
+#
+# SO THIS ASKS A DIFFERENT QUESTION, and it is one this file already answers:
+# IS THIS PATH PART OF THE PLUGIN'S OWN DECLARED SURFACE? That is not an
+# inference about the file — it is a lookup in the enumeration install.sh
+# copies from and every frozen table under manifests/ is cut from. A path is in
+# it because the project SAYS it ships that path, which is exactly the "fact
+# about a project's layout" the bbh region header says no shape or content
+# check can recover.
+#
+# WHY THE WHOLE SURFACE AND NOT A "GOVERNING" SUBSET. Because a subset would
+# have to be minted here, and a minted list is a new place for the next
+# artifact to be missing — the objection that removed the `docs/` arm rather
+# than narrowing it. The manifest's own header already states the property that
+# makes the whole surface the right answer: workflow-class files are "plugin-
+# owned product ... an operator edit to one of them is a local fork, not a
+# setting". A local fork of plugin product is a change to the product. The two
+# shipped docs (docs/HOOKS.md, docs/CODEX_SETUP.md) are inside for that reason
+# and not by accident; docs/HOOKS.md in particular is a contract this repo's
+# own specs assert against.
+#
+# WHAT IT COSTS, measured rather than assumed, because that is the half of a
+# fast-path change that is usually skipped. Over this repo's whole history at
+# b8f0095 — 142 non-merge commits, classifier extracted from the shipped hook
+# and driven per path, manifest regenerated from each commit's own tree via
+# `git archive`:
+#     7 commits were doc-only, i.e. F1-eligible;
+#     1 of those 7 also touched a governing artifact (ea6ae385, docs/HOOKS.md
+#       alone) and would now need a QA round.
+# Counted the other way round, from churn: 60 commits touched a veto-reachable
+# governing artifact, and 59 of them carried a reviewable path anyway, so F1
+# was never available to them. Governing artifacts change CONSTANTLY here
+# (LESSONS.md 37, docs/HOOKS.md 23, .claude/agents/qa.md 22) and essentially
+# never alone. The availability cost is 1 commit in 142, not the broad loss the
+# churn figures suggest at a glance.
+#
+# WHAT IT DOES NOT REACH, stated because a fast path that auto-approves is
+# allowed to be narrow and is not allowed to be wrong:
+#   * A DELETION. The enumeration is built from files that exist, so deleting
+#     `.claude/agents/qa.md` alone is still doc-only. This is the same
+#     asymmetry the content veto documents and defends — an absent file is not
+#     evidence — and closing it would need a path-SHAPE rule for "would have
+#     been a row", i.e. the inference bbh removed. Deleting a plugin-owned
+#     artifact correctly also moves .claude-plugin/plugin.json or a frozen
+#     table, neither of which is doc-named, so a correct deletion is not
+#     doc-only anyway.
+#   (`docs/specs/<task-id>.md`, the v5 design record, WAS listed here as the
+#   second unreachable case. claude-workflow-plugin-fkm.3 / D1 closed it — see
+#   the design-artifact row in runtime_contract_rows below, which is why the
+#   route this note recommended, a reader for a marker the designer writes, was
+#   NOT the one taken.)
+#
+# runtime_contract_rows — files the plugin does NOT ship, whose content
+# nonetheless governs how it behaves. `generate_rows` must never call this and
+# no install path may read it: these are not part of the shipped surface, they
+# have no class, no upgrade verdict and no uninstall row. CLAUDE.md is here
+# because Claude Code auto-loads it into every agent's context — a product fact
+# about the runtime, the same kind of fact as `.claude/settings.json` being the
+# settings file, and not an inference from `.md` or from sitting at the root.
+# Naming an individual file is house-consistent: the surface above names
+# docs/HOOKS.md, docs/CODEX_SETUP.md and .worktreeinclude one by one.
+#
+# THE DESIGN-ARTIFACT ROW IS A DECLARED DIRECTORY, NOT A NAMED FILE
+# (claude-workflow-plugin-fkm.3 / D1), and that difference is stated rather than
+# glossed because it is the one thing here a reviewer could reasonably push back
+# on. CLAUDE.md is one path this file spells out. `docs/specs/*.md` cannot be:
+# the artifact is named for the task it designs, so the set is only knowable at
+# scan time. Every OTHER property of the mechanism is unchanged — still inside
+# the function `generate_rows` never calls, still no class, no upgrade verdict,
+# no uninstall row, no install copy.
+#
+# IT IS STILL A DECLARATION AND NOT A PATH INFERENCE, which is the distinction
+# the operator's ruling on claude-workflow-plugin-bbh drew. The removed `docs/`
+# arm asked "does this path LOOK like documentation?" and answered from its
+# shape, which is why `docs/deploy.sh` auto-approved. This asks nothing about
+# the path: `docs/specs` is the directory THIS PROJECT'S WORKFLOW WRITES ITS
+# DESIGN ARTIFACT INTO — the same kind of product fact as CLAUDE.md being
+# auto-loaded — and the row exists because the project says so, not because the
+# name ends in `.md` or sits under `docs/`. An operator's ordinary
+# `docs/architecture.md` is untouched, and so is every other file in `docs/`;
+# the directory named here is one the plugin created for itself.
+#
+# WHY NOT THE ALTERNATIVE THIS FILE PREVIOUSLY POINTED AT. The note above
+# suggested D1 disqualify the artifact "from the design RECORD that names the
+# file, or from a machine-readable marker the designer writes INTO it". Both are
+# reachable now that D1 writes both, and the record route was rejected for a
+# specific reason: is_doc_only_path runs per PATH inside a Stop hook with no
+# task context and no bd, so a record lookup there would be a bd call per
+# candidate path — and it would answer "no" for the artifact of a design that
+# has not been recorded YET, which is exactly the window (a designer-only change
+# set, before any record exists) the veto has to cover. The marker route reads
+# file CONTENT, which the DOC-CONTENT-VETO already does — but it would make the
+# veto depend on the designer having written a well-formed block, i.e. an agent
+# could opt its own artifact back into the fast path by malforming it. A
+# declaration is decided by the project, not by the document under review.
+#
+# ORIGIN IS `design-artifact`, NOT `runtime-contract`. Same function, different
+# token, so the Stop hook's log line says which declaration vetoed the path, and
+# so "the ONLY runtime-contract row is CLAUDE.md" stays an assertable invariant
+# about NAMED files while the directory declaration grows beside it.
+#
+# THE AVAILABILITY COST, measured the way s5qf measured its own: every design
+# artifact loses the F1 fast path when it changes alone. That is the entire
+# point rather than a side effect — a designer-only change set is precisely the
+# one that must not auto-approve with reviewed_by=none, because the document it
+# contains is what the whole release exists to review. Over this repo's history
+# the cost is exactly zero commits, because `docs/specs/` does not exist before
+# this release; over an installed project it is one QA round per design
+# revision, which is the review the phase mandates anyway.
+DESIGN_SPEC_SUBDIR="docs/specs"
+
+# scan_declared_dir <class> <dir> <name-glob>
+# THE DECLARATION SCAN. It differs from scan_flat above in exactly one way: it
+# enumerates directory ENTRIES rather than regular files, so a SYMLINK matching
+# the glob is declared too.
+#
+# WHY (claude-workflow-plugin-fkm.3, QA round 2 finding R2-F2). `find -maxdepth 1
+# -type f` EXCLUDES symlinks, and that was measured against the shipped scan: with
+# docs/specs/<tid>.md a symlink to ../../outside/design.md, `governing` emitted NO
+# row for it while a regular file in the same directory emitted one. The F1
+# doc-only fast path this declaration exists to close therefore reopened for the
+# design artifact itself — a change set of exactly that path would auto-approve
+# with reviewed_by=none, which is the one outcome the declaration was added to
+# prevent. The declaration is about A PATH THIS PROJECT'S WORKFLOW WRITES ITS
+# DESIGN INTO; what kind of directory entry sits at that path does not change
+# whose document it is, and the fail-closed answer is to declare it.
+#
+# scan_flat IS DELIBERATELY NOT CHANGED TO MATCH. It builds the SHIPPED SURFACE,
+# whose output is frozen per release under manifests/ and compared byte-for-byte
+# by the reproducibility assert, and install.sh copies files rather than links —
+# so widening it would move frozen rows for a case no install path produces. The
+# spec asserts that boundary from both sides: a symlink in the declared directory
+# IS governing, a symlink in .claude/agents/ leaves `generate` byte-unchanged.
+#
+# A DANGLING link is declared too. It is a path the project declared, and "the
+# target is missing" is not a reason to hand the Stop gate a fast path over it —
+# an absent file is not evidence, the same asymmetry the region header states
+# above. `emit_row` would drop it (its `[ -f ]` guard follows the link), so the
+# non-regular branch emits the enumeration row directly. That branch carries no
+# digest column, which is exactly right for the only caller — generate_governing
+# runs with MANIFEST_EMIT_HASH=0 and cmd_governing's header states the
+# enumeration carries no digests — and `generate` never reaches this function at
+# all. If a FUTURE caller ever turns hashing on, that branch would emit a
+# two-field row into a three-field table and the consumer's field-2 origin read
+# would silently start reading a hash; so it DIES there instead. A sentinel in
+# the hash column is the alternative and it is the one this file has already
+# ruled out twice (see hash_file, and the hash-file header below): a constant
+# compares equal to every other artifact and to itself after any edit.
+#
+# NOT A DELETION FIX, and it does not make one harder: the enumeration is still
+# built from entries that EXIST, so removing a declared artifact is still
+# invisible to it (claude-workflow-plugin-mdnc, which is pre-existing for every
+# declared path — CLAUDE.md, the agent prompts, the rubrics). This strictly ADDS
+# rows; nothing that was declared before stops being declared.
+#
+# THE DECLARED DIRECTORY MAY ITSELF BE A SYMLINK, and `-H` is what makes that
+# case work (fkm.3 QA round 4, R4-F3). `find` does not descend a final
+# directory-symlink operand without -H or -L — measured identical on BSD find
+# and GNU findutils 4.10.0 — while the `[ -d "$dir" ]` guard above it DOES
+# follow. So the guard passed and the scan came back silently EMPTY: `ls
+# docs/specs/` listed the artifact and `governing` emitted no row for it, which
+# is R2-F2's harm reached by a second route. `-H` is the narrow spelling on
+# purpose: it follows COMMAND-LINE operands only, so entries INSIDE the
+# directory are still reported as themselves and a symlinked artifact is still
+# declared by the `-type l` arm rather than by its target's type.
+#
+# THE ENUMERATION'S STATUS IS THE DECLARATION'S STATUS (R4-F2). The scan used to
+# run inside a process substitution with `2>/dev/null`, which discarded find's
+# diagnostic AND lost its exit status — so a directory that is searchable but
+# not listable (mode 0311) produced zero rows at rc 0 while the artifact stayed
+# stat-able, readable and hashable by name. That FALSIFIES AN INVARIANT THE
+# CONSUMER DOCUMENTS: verify-before-stop.sh's load_governing_set captures this
+# query's rc precisely because "an empty set from a FAILED run is not
+# [legitimate]" — the outer layer distinguishes the two carefully and the inner
+# layer handed it a failure wearing an empty set's clothes. So find writes to a
+# file whose status can be read, and a failed enumeration DIES.
+#
+# WHAT THE CONSUMER DOES WITH THE FAILURE is unchanged and is not this
+# function's call: load_governing_set logs a sync error and classifies as it did
+# before the declaration existed. That is s5qf's deliberate fail-open-with-a-log
+# on an unanswerable query. The defect fixed here is that the query was ANSWERING
+# — wrongly, and silently — rather than failing.
+scan_declared_dir() {
+    local class="$1"
+    local dir="$2"
+    local glob="$3"
+    local f listing find_err find_rc=0
+    [ -d "$dir" ] || return 0
+    # One fixed name: the listing is fully consumed before the next call, and
+    # generate_governing (the only caller, through governing_rows) has already
+    # created WORK_DIR, so this is a no-op that keeps the function honest if a
+    # second caller ever appears.
+    mk_workdir
+    listing="$WORK_DIR/declared-scan.z"
+    find_err=$( { find -H "$dir" -maxdepth 1 \( -type f -o -type l \) -name "$glob" -print0 >"$listing"; } 2>&1 ) || find_rc=$?
+    if [ "$find_rc" -ne 0 ]; then
+        die "scan_declared_dir: could not ENUMERATE the declared directory '$dir' (find exited $find_rc; find said: ${find_err:-<no diagnostic>}). The declaration is a VETO, so an empty answer and a failed one must not look alike: the consumer treats an empty set as 'nothing is declared' and fast-paths, and a failed query as 'unavailable' and logs it. Refusing here is what keeps that distinction real."
+    fi
+    while IFS= read -r -d '' f; do
+        if [ -f "$f" ]; then
+            emit_row "$class" "$f"
+        elif [ "$MANIFEST_EMIT_HASH" = "0" ]; then
+            printf '%s\t%s\n' "$f" "$class"
+        else
+            die "scan_declared_dir: $f is declared but has no hashable content (a dangling link), and hashing is on. The declaration is an ENUMERATION — generate_governing sets MANIFEST_EMIT_HASH=0 — so there is no digest for a third column, and a sentinel there would be a constant that compares equal to every other row and to itself after any edit."
+        fi
+    done < "$listing"
+}
+
+runtime_contract_rows() {
+    emit_row runtime-contract "CLAUDE.md"
+    scan_declared_dir design-artifact "$DESIGN_SPEC_SUBDIR" '*.md'
+    release_claim_rows
+}
+
+# THE CLAIMS DOCUMENTS. These state what the project asserts about itself -- the
+# audit ledger's verdicts and tally, the release notes, and the README sections
+# describing what each mechanism does. They are governing artifacts for one
+# reason, and it is not their importance in the abstract:
+#
+# BEING ABSENT FROM THIS SET IS WHAT AUTO-APPROVED THEM. The Stop hook's
+# doc-only fast path takes any `*.md` path that is NOT a governing artifact and
+# releases it without review. On 2026-09-30 that fired on the v5.0.0 release
+# documents themselves: all three matched `is_doc_only_path`, none was in this
+# set, and the gate recorded an approval with `reviewed_by=none` EIGHTY-FOUR
+# SECONDS after the reviewer was spawned -- the approval's cleanup then
+# baselined the whole tree as pre-existing, so the change set it bound was the
+# empty-input sentinel. The documents describing a release whose headline fix is
+# "an approval must not bind nothing" were approved by that exact defect.
+#
+# Routing them through a review once, by hand, for one release, does not fix
+# that: the next release's notes would take the fast path again. Classification
+# is the fix, because it is the thing the fast path actually consults.
+#
+# SCOPED TO A TREE THAT KEEPS A CLAIMS LEDGER, and the scoping is the whole
+# design rather than a convenience. An unconditional rule here would classify
+# EVERY consumer project's README and CHANGELOG as governing, which is precisely
+# the error `doc-only-classifier.test.sh` names in its own section 2c:
+#
+#     ANTI-OVERREACH. Documentation must not lose the fast path -- F1 exists for
+#     exactly these commits, and a fix that deadlocks them is the same error in
+#     the other direction.
+#
+# That guard is correct and this must not break it. The incident being fixed is
+# about THIS project's claims surfaces, not about documentation in general, so
+# the trigger is the presence of the claims ledger itself: a tree that maintains
+# `docs/RELEASE_AUDIT.md` is a tree that makes auditable release claims, and its
+# claims documents are governing. `install.sh` ships only
+# `docs/CODEX_SETUP.md` and `docs/HOOKS.md` into a target (SHIPPED_DOCS), so no
+# consumer acquires the ledger by installing the plugin and no consumer's
+# ordinary doc commit is deadlocked by this rule.
+#
+# The cost, where it applies, is deliberate and small: a typo fix in this repo's
+# README now needs a review round. That is the correct trade for a surface whose
+# whole function is to make claims a reader will act on.
+# Filed as `claude-workflow-plugin-v6pr`.
+release_claim_rows() {
+    [ -f "docs/RELEASE_AUDIT.md" ] || return 0
+    local f
+    for f in "CHANGELOG.md" "README.md" "docs/RELEASE_AUDIT.md"; do
+        [ -f "$f" ] || continue
+        emit_row release-claim "$f"
+    done
+}
+
+governing_rows() {
+    generate_rows
+    runtime_contract_rows
+}
+
+# generate_governing <source-root> -> sorted TSV on stdout.
+# Same all-or-nothing discipline as generate_manifest: buffered to a file and
+# sorted separately, so a failing left-hand side can never hide behind sort's
+# exit status and hand a caller a silently truncated set. For THIS caller a
+# truncated set is a missed veto, i.e. a release nobody reviewed.
+generate_governing() {
+    local root="$1"
+    local raw
+    mk_workdir
+    raw="$WORK_DIR/governing.tsv"
+    ( cd "$root" && MANIFEST_EMIT_HASH=0 governing_rows ) > "$raw"
+    LC_ALL=C sort "$raw"
+}
+# GOVERNING-ARTIFACT-SURFACE END (claude-workflow-plugin-s5qf)
+
 # ---------------------------------------------------------------------------
 # generate
 
@@ -372,7 +771,98 @@ cmd_generate() {
 }
 
 # ---------------------------------------------------------------------------
+# governing
+#
+# No require_hash_tool: the enumeration carries no digests, so this answers on
+# a box with neither sha256sum, shasum nor openssl. That matters because the
+# caller is a Stop hook, and a gate that silently stops vetoing when a hashing
+# tool is missing would be the worst kind of failure — invisible and in the
+# releasing direction.
+
+cmd_governing() {
+    local root="${1:-}"
+    [ -n "$root" ] || usage_error "governing requires <source-root>"
+    [ "$#" -le 1 ] || usage_error "governing takes exactly one argument"
+    [ -d "$root" ] || usage_error "governing: source root not found: $root"
+    generate_governing "$root"
+}
+
+# ---------------------------------------------------------------------------
 # classify
+
+# DESIGN-ARTIFACT-HASH BEGIN (claude-workflow-plugin-fkm.3 / D1)
+#
+# hash-file <path> — the ONE content digest of a NAMED BLOB, as opposed to
+# impact-report.sh --hash-only, which is the ONE canonicalisation of a CHANGE
+# SET. Two different questions; keeping them in two places is deliberate.
+#
+# WHY IT LIVES HERE and not on impact-report.sh, where the v5 plan sketched it
+# as `--hash-file`. hash_file() above already has exactly the contract a binding
+# needs and impact-report.sh's hasher has the inverse of it:
+#
+#   * NO SENTINEL. hash_file dies when it cannot produce 64 lowercase hex.
+#     impact-report.sh's sha256_stdin prints the literal `sha256-unavailable` on
+#     a host with no sha tool — a CONSTANT, so every artifact would hash equal to
+#     every other one and equal to itself after any edit. This repo has ruled
+#     that sentinel a defect twice (qa-gate.sh's CHANGE_SET_HASH_UNAVAILABLE
+#     note, verify-before-stop.sh's "THIS COPY TOOK HALF THE CURE" / _vl_is_hash)
+#     and both times the cure was a SHAPE TEST, NEVER AN IDENTITY TEST. A gate
+#     that binds to a design document must not inherit an unfailable comparison.
+#   * RAW BYTES. The plan's spelling piped the file through
+#     `sed -e 's/\r$//' -e 's/[[:space:]]*$//'` first. Measured on this repo's
+#     platform: that collapses a Markdown HARD LINE BREAK (two trailing spaces)
+#     into no break — `line one  \nline two` and `line one\nline two` both hash
+#     to e9024f1a…, while their raw digests differ (87f1d7bd… vs e9024f1a…). The
+#     artifact IS Markdown, so the normalisation makes a real content edit
+#     invisible to the hash it exists to detect — the exact inverse of the goal.
+#     `s/\r$//` is additionally redundant: POSIX [[:space:]] includes CR, and
+#     both spellings were measured byte-identical. Raw bytes also mean a reviewer
+#     reproduces any recorded binding with `shasum -a 256 <file>` by hand, which
+#     a sed pipeline does not allow.
+#
+#     WHAT RAW BYTES GIVE UP, said here and not only in the spec that drives it:
+#     LINE-ENDING INSENSITIVITY, which is the one thing `s/\r$//` bought and is
+#     now unserved. A CRLF checkout of the same artifact (git
+#     `core.autocrlf=true` on Windows, or an editor that rewrites endings on
+#     save) digests differently from the LF one although the Markdown renders
+#     identically, so a design recorded on one checkout reads as CHANGED on the
+#     other. The cost is bounded and LOUD rather than silent: approve's ladder
+#     withholds the token and names both hashes ("the design artifact has
+#     CHANGED since it was recorded"), and the designer re-records. The trade is
+#     deliberate — a hash blind to a Markdown hard line break is wrong in the
+#     RELEASING direction, while one that sees a line-ending change is
+#     inconvenient in the REFUSING direction.
+#
+# THE THREE REFUSALS FIRE BEFORE ANY HASHING, and that ordering is the whole
+# point of the subcommand rather than a nicety. A missing, unreadable or EMPTY
+# file digests to e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+# — the sha256 of zero bytes, which impact-report.test.sh pins as the EMPTY
+# CHANGE SET constant. It is 64 valid hex, it passes any shape check, and it is
+# stable across calls, so a binding taken over an absent artifact would compare
+# EQUAL to itself forever and the meta-test "strip the hash and the binding must
+# fail" would pass vacuously. hash_file already dies on missing/unreadable (the
+# digest comes back empty and fails the 64-char check); EMPTY is the one that
+# gets through, so it is refused explicitly and by name.
+#
+# Exit codes follow this file's contract: 0 with the digest on stdout, 1 for a
+# runtime refusal (naming which), 2 for usage.
+cmd_hash_file() {
+    local path="${1:-}"
+    [ -n "$path" ] || usage_error "hash-file requires <path>"
+    [ "$#" -le 1 ] || usage_error "hash-file takes exactly one argument"
+    if [ ! -f "$path" ]; then
+        die "hash-file: no such file: $path (refusing before hashing — an absent path digests to the sha256 of zero bytes, which is valid-looking, constant, and would bind an approval to nothing)"
+    fi
+    if [ ! -r "$path" ]; then
+        die "hash-file: not readable: $path (refusing before hashing — an unreadable path digests to the sha256 of zero bytes, which is valid-looking, constant, and would bind an approval to nothing)"
+    fi
+    if [ ! -s "$path" ]; then
+        die "hash-file: file is empty: $path (refusing before hashing — zero bytes digest to e3b0c442…, the same constant the empty change set produces, so the binding would be indistinguishable from no artifact at all)"
+    fi
+    require_hash_tool
+    hash_file "$path"
+}
+# DESIGN-ARTIFACT-HASH END (claude-workflow-plugin-fkm.3 / D1)
 
 cmd_classify() {
     local target=""
@@ -454,9 +944,27 @@ cmd_classify() {
     # always. This is the guard that turns a future join regression (the
     # NR == FNR trap above was one, caught pre-ship) into a loud failure
     # instead of a silently truncated upgrade plan.
-    local src_rows joined_rows
-    src_rows=$(wc -l < "$src_tsv" | tr -d ' ')
-    joined_rows=$(wc -l < "$joined" | tr -d ' ')
+    #
+    # i8cx: `wc -l < file | tr -d ' '` masked a failing `wc` into an EMPTY
+    # count rather than a number — mostly self-correcting already (an empty
+    # string almost never equals a real row count, so the mismatch die() below
+    # still fired), EXCEPT when both wc calls failed identically (e.g. `tr`
+    # itself broken), which made "" = "" compare equal and silently skip the
+    # self-check entirely. `wc` is now called alone (no pipe) so its own rc is
+    # directly observable; `tr` runs afterward on the already-captured
+    # in-memory string, which cannot itself mask an upstream failure.
+    local src_rows joined_rows src_wc="" joined_wc="" wc_rc=0
+    src_wc=$(wc -l < "$src_tsv" 2>/dev/null) || wc_rc=$?
+    if [ "$wc_rc" -ne 0 ]; then
+        die "internal: could not count rows in $src_tsv (wc exited $wc_rc)"
+    fi
+    src_rows=$(printf '%s' "$src_wc" | tr -d ' ')
+    wc_rc=0
+    joined_wc=$(wc -l < "$joined" 2>/dev/null) || wc_rc=$?
+    if [ "$wc_rc" -ne 0 ]; then
+        die "internal: could not count rows in $joined (wc exited $wc_rc)"
+    fi
+    joined_rows=$(printf '%s' "$joined_wc" | tr -d ' ')
     if [ "$src_rows" != "$joined_rows" ]; then
         die "internal: old-table join produced $joined_rows row(s) for $src_rows source row(s)"
     fi
@@ -515,6 +1023,14 @@ case "${1:-}" in
     generate)
         shift
         cmd_generate "$@"
+        ;;
+    governing)
+        shift
+        cmd_governing "$@"
+        ;;
+    hash-file)
+        shift
+        cmd_hash_file "$@"
         ;;
     classify)
         shift

@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "802bc1b16d2af3abf3124276e01479f98bc9e5b30a226b262fc3e1c99c08e1cc",
+  "risk_threshold": "high",
+  "stop_condition": "Every wave-1 unit (U1 Stop hook, U2 approval binding, U3/U4 gate chain, plus the verify-before-stop half of U7 present in the change set) distinguishes legitimately-empty from unreadable in the SHIPPED code: an absent tracker, a clean tree, and a missing baseline all release/proceed, and every induced read failure refuses loudly; no critical/high finding remains in the Stop-hook release path, the approval binding, or the baseline capture.",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "medium",
+      "location": ".claude/.qa-tracking/gate-baseline:1",
+      "evidence": "gate-baseline captured 2026-08-25T18:28:29Z at head=6d0011f still listed \" M .claude/scripts/qa-gate.sh\" (+7 fixture copies, run-tests.sh) after ed45abe committed that dirt; wave-1 re-dirtied the same paths and comm -12 vs current porcelain proved 9 reviewable wave-1 paths would be subtracted from the change set as pre-existing — the approval would have bound a set MISSING qa-gate.sh (U3/U4). Repaired at gate time by appending the 9 paths to changed-files.txt (snapshot kept); post-repair reconcile reports subtracted=0 and the canonical set carries all 8 real files.",
+      "description": "Pre-existing design limit, not a wave-1 regression: baseline entries match by porcelain line with no HEAD binding, so a path committed-then-re-dirtied within one baseline generation is silently masked; qa-gate.sh:3700 documents this as the honest limit (reported, not refused). Wave 1 makes the reporting reliable; a follow-up should consider HEAD-aware baseline invalidation."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "low",
+      "location": ".claude/scripts/verify-before-stop.sh:1877",
+      "evidence": "current-task.sh cmd_get ends [ -n tid ] && printf, so a marker file containing only whitespace exits rc 1 with empty stdout; U7 branch takes any non-zero as read-FAILED and logs \"exists but could not be read\" for a file that was read fine and was merely blank.",
+      "description": "Mislabelled log line in a state cmd_set cannot produce (requires manual corruption); gating outcome is unchanged (degrades to no-task, never auto-approve). The dedicated-rc helper half is explicitly deferred in the U7 comment; fold this into it."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "info",
+      "location": ".claude/scripts/tests/change-set-undeterminable.test.sh:2",
+      "evidence": "The wave-1 brief and the acceptance comment name units U1/U2/U3+U4, but the change set also carries the verify-before-stop half of U7 (get_current_task, get_recorded_repo, detect_cross_repo) — disclosed in the spec header and run-tests.sh 52->53 note, tested by the same spec, absent from the acceptance comment unit list.",
+      "description": "Reviewed here as part of the change set; record-keeping nit only."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "info",
+      "location": ".claude/.qa-tracking/impact-report---change-set-hash.json:1",
+      "evidence": "impact-report---change-set-hash.json (Aug 19, 1.9MB) and impact-report---list.json (Aug 12, 2.2MB) exist: some historical caller passed a flag where impact-report.sh expects a task id and a full report was generated under that name.",
+      "description": "Pre-existing argv wart, not wave-1; candidate cleanup + arg-validation follow-up."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}

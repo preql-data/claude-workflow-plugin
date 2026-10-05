@@ -23,20 +23,29 @@
 #       pins the whole workflow to <id>.
 #
 #   workflow-model-apply.sh --role <role> <new-model-id>
-#       Rewrites only the agents in <role> (orchestrator | implementer |
-#       reviewer | all). env.CLAUDE_LATEST_OPUS is updated ONLY when the
-#       role is `all` or `implementer` (the env hint now means "latest
-#       opus-class = the implementer lane").
+#       Rewrites only the agents in <role> (designer | design_reviewer |
+#       orchestrator | implementer | reviewer | all). env.CLAUDE_LATEST_OPUS
+#       is updated ONLY when the role is `all` or `implementer` (the env hint
+#       now means "the implementer lane's current id").
 #
 #   workflow-model-apply.sh --print-role-map
 #       Emit `role<TAB>agent` lines — one per agent, each agent exactly
 #       once — the single source of truth for role->agent parity tests.
 #
-# Roles:
-#   orchestrator -> orchestrator
-#   implementer  -> backend frontend devops
-#   reviewer     -> qa grader judge
-#   all          -> every agent (the seven above)
+# Roles (v5.0.0 Phase D0 added the two design lanes):
+#   designer        -> designer
+#   design_reviewer -> design-reviewer
+#   orchestrator    -> orchestrator
+#   implementer     -> backend frontend devops
+#   reviewer        -> qa grader judge
+#   all             -> every agent (the nine above)
+#
+# NOTE the spelling split, which is deliberate and load-bearing: the ROLE is
+# `design_reviewer` (underscore — it is a shell-safe key in .claude/model-roles
+# and a JSON key in the resolved artifact) while the AGENT FILE is
+# `design-reviewer.md` (hyphen — matching every other agent filename and the
+# `@design-reviewer` invocation form). role_agents() is the only place the two
+# meet.
 #
 # Exit codes:
 #   0  rewrite completed (zero or more files actually changed; idempotent)
@@ -52,7 +61,7 @@ PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 usage() {
     printf 'usage: %s <new-model-id>\n' "$(basename "$0")" >&2
-    printf '       %s --role <orchestrator|implementer|reviewer|all> <new-model-id>\n' "$(basename "$0")" >&2
+    printf '       %s --role <designer|design_reviewer|orchestrator|implementer|reviewer|all> <new-model-id>\n' "$(basename "$0")" >&2
     printf '       %s --print-role-map\n' "$(basename "$0")" >&2
 }
 
@@ -61,25 +70,38 @@ usage() {
 # source of truth for the class->agent mapping; print_role_map and every
 # per-role rewrite derive from it so a class change lands in one place.
 #
-# grader.md / judge.md were added in later phases; the rewrite loop
-# tolerates a missing file, so listing them here is safe even before the
-# files exist in a given install.
+# grader.md / judge.md were added in later phases, and designer.md /
+# design-reviewer.md in v5.0.0; the rewrite loop tolerates a missing file, so
+# listing them here is safe even before the files exist in a given install.
+# CONCRETE_ROLES — the role classes that own agents, in the order
+# print_role_map emits them. `all` is excluded: it is their UNION, not a class.
+# Mirrors ALL_ROLES in model-select.sh; the two are kept in agreement by
+# model-roles.test.sh section 3.
+CONCRETE_ROLES="designer design_reviewer orchestrator implementer reviewer"
+
 role_agents() {
+    local r
     case "$1" in
-        orchestrator) printf 'orchestrator\n' ;;
-        implementer)  printf 'backend\nfrontend\ndevops\n' ;;
-        reviewer)     printf 'qa\ngrader\njudge\n' ;;
-        all)          printf 'orchestrator\nqa\nbackend\nfrontend\ndevops\ngrader\njudge\n' ;;
-        *)            return 1 ;;
+        designer)        printf 'designer\n' ;;
+        design_reviewer) printf 'design-reviewer\n' ;;
+        orchestrator)    printf 'orchestrator\n' ;;
+        implementer)     printf 'backend\nfrontend\ndevops\n' ;;
+        reviewer)        printf 'qa\ngrader\njudge\n' ;;
+        # `all` is DERIVED, never a second hand-maintained list. Through v4.1
+        # it was spelled out, so every new agent had to be added in two arms
+        # and the union was one edit away from disagreeing with the classes it
+        # is supposed to be the union of.
+        all)             for r in $CONCRETE_ROLES; do role_agents "$r"; done ;;
+        *)               return 1 ;;
     esac
 }
 
-# print_role_map — emit `role<TAB>agent` for every agent across the three
-# concrete role classes, each agent exactly once. Derived directly from
-# role_agents() so the map can never drift from the rewrite target set.
+# print_role_map — emit `role<TAB>agent` for every agent across the concrete
+# role classes, each agent exactly once. Derived directly from role_agents()
+# so the map can never drift from the rewrite target set.
 print_role_map() {
     local role agent
-    for role in orchestrator implementer reviewer; do
+    for role in $CONCRETE_ROLES; do
         while IFS= read -r agent; do
             [ -z "$agent" ] && continue
             printf '%s\t%s\n' "$role" "$agent"
@@ -108,7 +130,8 @@ case "${1:-}" in
             exit 1
         fi
         if ! role_agents "$ROLE" >/dev/null 2>&1; then
-            printf 'Refusing: unknown role %q (want orchestrator|implementer|reviewer|all).\n' "$ROLE" >&2
+            printf 'Refusing: unknown role %q (want %s|all).\n' \
+                "$ROLE" "$(printf '%s' "$CONCRETE_ROLES" | tr ' ' '|')" >&2
             exit 1
         fi
         ;;
@@ -146,16 +169,28 @@ $(role_agents "$ROLE")
 EOF
 
 CHANGED=0
+SKIPPED=0
+SKIPPED_NAMES=""
 
 for agent in "${AGENTS[@]}"; do
     f="$PROJECT_DIR/.claude/agents/${agent}.md"
     if [ ! -f "$f" ]; then
-        # grader.md / judge.md not yet present is the expected pre-phase
-        # state; stay silent rather than spamming the operator. Other
-        # missing agents are an installer bug and we surface them.
-        if [ "$agent" != "grader" ] && [ "$agent" != "judge" ]; then
-            printf 'skip: %s (missing)\n' "$f"
-        fi
+        # A missing agent file is COUNTED, never name-tested (D0).
+        #
+        # Through v4.1 this arm read `if [ "$agent" != "grader" ] && [ "$agent"
+        # != "judge" ]` — a hardcoded pair of "these two may legitimately be
+        # absent" names. That list could only ever be right for the release
+        # that wrote it: every agent shipped afterwards (designer,
+        # design-reviewer) would have printed a scary per-file `skip:` line on
+        # every pre-upgrade install, and every agent RETIRED afterwards would
+        # have kept its silence forever.
+        #
+        # So the loop no longer judges WHICH absence is expected. It counts
+        # them and prints ONE summary line naming all of them, below. The
+        # operator gets strictly more information, and the check has nothing
+        # left to go stale.
+        SKIPPED=$((SKIPPED + 1))
+        SKIPPED_NAMES="${SKIPPED_NAMES:+$SKIPPED_NAMES, }$agent"
         continue
     fi
     OLD=$(grep -E '^model:' "$f" | head -1 | awk '{print $2}')
@@ -200,5 +235,8 @@ if [ "$ROLE" = "all" ] || [ "$ROLE" = "implementer" ]; then
     fi
 fi
 
+if [ "$SKIPPED" -gt 0 ]; then
+    printf 'skipped: %d agent file(s) not present (%s)\n' "$SKIPPED" "$SKIPPED_NAMES"
+fi
 printf '\nSummary: %d agent file(s) updated to %s (role: %s).\n' "$CHANGED" "$NEW_MODEL" "$ROLE"
 exit 0

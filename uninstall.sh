@@ -142,14 +142,27 @@ hash_of() {
     local raw=""
     local out=""
     [ -f "$f" ] || return 0
+    # `out="${out#\\}"` decodes the ESCAPED output line GNU coreutils and perl's
+    # Digest::SHA emit when the filename holds a backslash or a newline: the
+    # line is prefixed with ONE backslash, so field 1 reads `\<64 hex>` and the
+    # 64-char guard below rejects a CORRECT digest. See hash_file in
+    # .claude/scripts/workflow-manifest.sh for the format citation
+    # (claude-workflow-plugin-18fc). Fail-CLOSED and safe here — an
+    # unverifiable file is left alone — but it degrades for any install target
+    # whose path carries either byte, and this helper compares against a
+    # manifest that generator WROTE, so both sides must decode or the row never
+    # matches. The decode is a no-op on unescaped output: a hex digest cannot
+    # start with a backslash. openssl needs none (see its arm).
     case "$HASH_TOOL" in
         sha256sum)
             raw=$(sha256sum "$f" 2>/dev/null) || raw=""
             out="${raw%% *}"
+            out="${out#\\}"  # SHA256-ESCAPE-DECODE
             ;;
         shasum)
             raw=$(shasum -a 256 "$f" 2>/dev/null) || raw=""
             out="${raw%% *}"
+            out="${out#\\}"  # SHA256-ESCAPE-DECODE
             ;;
         openssl)
             # openssl 1.x prints "SHA256(f)= <hex>", 3.x "SHA2-256(f)= <hex>";

@@ -39,8 +39,9 @@
 #      PASS BY NAME out of --json-out.
 #   3. Fresh install, DEFAULT flags — @modelcontextprotocol/sdk present in both
 #      server trees. Network-gated (net_available).
-#   4. Full doctor, no skips — exit 0, all 11 checks PASS. THIS IS THE ASSERTION
-#      THAT WOULD HAVE CAUGHT THE ORIGINAL P0.
+#   4. Full doctor, no skips — exit 0, 12 of 13 checks PASS and model_parity
+#      self-SKIPs (no model-select cache on a fresh install). THIS IS THE
+#      ASSERTION THAT WOULD HAVE CAUGHT THE ORIGINAL P0.
 #   5. Offline boot leg — a --skip-mcp-deps target plus a copied node_modules
 #      boots both servers: mcp_bd 21 tools, mcp_code_graph 7. Runs with no
 #      network, so the air-gapped recipe in docs/MCP_SERVERS.md is executed,
@@ -62,7 +63,8 @@
 # RUNTIME. Measured on an M-series laptop: an install is ~7s, a doctor run with
 # the two server checks skipped is ~5s, a full one ~9s. Section 3's `npm ci` is
 # the only network step and the only slow one. The METAs use skip_all_but() so a
-# mutation aimed at one check does not pay for the other ten.
+# mutation aimed at one check does not pay for every other check in the
+# registry.
 #
 # EVERY TARGET IS AN mktemp -d (claude-workflow-plugin-1nz). Nothing here writes
 # to the live repo: workflow-doctor.test.sh carries a live-repo non-mutation
@@ -101,7 +103,7 @@ cat > "$FAKE_BIN/bd" <<'FAKE_BD'
 while [ "${1:-}" = "--no-daemon" ]; do shift; done
 case "${1:-}" in
     --version|-v|version)
-        printf 'bd 0.99.0 (fake-bd for installer specs)\n'
+        printf 'bd __FAKE_BD_VERSION__ (fake-bd for installer specs)\n'
         ;;
     init)
         mkdir -p .beads 2>/dev/null || true
@@ -126,6 +128,18 @@ esac
 exit 0
 FAKE_BD
 chmod +x "$FAKE_BIN/bd"
+# THE FAKE REPORTS THE INSTALLER'S OWN FLOOR, read from the install.sh under
+# test. v5's install.sh REFUSES any bd below RECOMMENDED_BD_VERSION
+# (claude-workflow-plugin-wyt3; -ishe R5-F1), so the fixed 0.99.0 this fake
+# used to report would turn every install in this spec into a refusal.
+# Reading the value keeps the fake at the floor when the floor moves. A failed
+# read is a harness error rather than a fake that silently reports nothing.
+FAKE_BD_VERSION=$(sed -n 's/^RECOMMENDED_BD_VERSION="\([0-9][0-9.]*\)"$/\1/p' "$PLUGIN_ROOT/install.sh" | head -1)
+[ -n "$FAKE_BD_VERSION" ] || { echo "HARNESS ERROR: no RECOMMENDED_BD_VERSION in $PLUGIN_ROOT/install.sh for the fake bd" >&2; exit 2; }
+sed "s/__FAKE_BD_VERSION__/$FAKE_BD_VERSION/" "$FAKE_BIN/bd" > "$FAKE_BIN/bd.tmp" \
+    && mv "$FAKE_BIN/bd.tmp" "$FAKE_BIN/bd" && chmod +x "$FAKE_BIN/bd"
+"$FAKE_BIN/bd" --version | grep -qF "bd $FAKE_BD_VERSION (fake-bd" \
+    || { echo "HARNESS ERROR: the fake bd does not report $FAKE_BD_VERSION" >&2; exit 2; }
 export PATH="$FAKE_BIN:$PATH"
 
 # --- helpers -----------------------------------------------------------------
@@ -257,9 +271,9 @@ skip_all_but() {
     printf '%s' "${out#,}"
 }
 
-assert_eq "installer-target-functional 0: the doctor's check registry extracted (11 names)" \
-    "11" "$DOCTOR_CHECK_COUNT"
-for _n in deps agents skill mcp_config settings_hooks beads session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop; do
+assert_eq "installer-target-functional 0: the doctor's check registry extracted (13 names)" \
+    "13" "$DOCTOR_CHECK_COUNT"
+for _n in deps agents skill mcp_config settings_hooks beads beads_ledger model_parity session_start mcp_bd mcp_code_graph gate_pretooluse gate_stop; do
     case " $DOCTOR_CHECKS " in
         *" $_n "*) ;;
         *)
@@ -380,6 +394,22 @@ else
     # counted. Nothing in this repo did that against a rendered target before
     # C0a, which is why "both servers dead in every curl install" shipped three
     # times behind a green suite.
+    #
+    # model_parity (claude-workflow-plugin-a13r) is the one check whose
+    # EXPECTED status here is SKIP, not PASS, and that is by design, not a
+    # gap: check-parity NEVER fetches (its own header), nothing in the
+    # install path ever calls a cache-populating subcommand, and this host
+    # has no ANTHROPIC_API_KEY provisioned for this spec, so the target's
+    # model-select cache is deterministically absent — the SAME state a real
+    # operator with no Anthropic API key sees. An earlier draft of this
+    # check FAILed on that state; MEASURED against install.sh's own
+    # --verify block (no --skip flags at all, the same shape this section
+    # exercises), that FAILed EVERY fresh install with no key, which is why
+    # workflow-doctor.sh's check_model_parity self-skips there instead (see
+    # its own header for the measurement). Asserted BY NAME, not silently
+    # omitted, so a regression that turned it into a FAIL — breaking every
+    # such install again — or a silent PASS — the false-agreement class this
+    # whole check exists to catch — is still visible here.
     D4="$WORK/doctor-full.json"
     D4_RC=0
     run_doctor "$T_FULL" "$D4" "$WORK/doctor-full.log" || D4_RC=$?
@@ -389,12 +419,17 @@ else
             "$D4" 2>/dev/null || true
     fi
     assert_eq "installer-target-functional 4: full doctor (no skips) exits 0" "0" "$D4_RC"
-    assert_eq "installer-target-functional 4: 11 checks passed, 0 failed, 0 skipped" \
-        "11 0 0" \
+    # 12 = 13 total minus the 1 self-skipped model_parity (no cache on a
+    # fresh install — see the note above).
+    assert_eq "installer-target-functional 4: passed=12, failed=0, skipped=1 (model_parity)" \
+        "12 0 1" \
         "$(jq -r '"\(.passed) \(.failed) \(.skipped)"' "$D4" 2>/dev/null || echo "?")"
     for _c in $DOCTOR_CHECKS; do
+        [ "$_c" = "model_parity" ] && continue
         assert_eq "installer-target-functional 4: $_c PASS" "PASS" "$(status_of "$D4" "$_c")"
     done
+    assert_eq "installer-target-functional 4: model_parity self-SKIPs on a cache-less fresh install (never a silent PASS, never breaks the install by FAILing)" \
+        "SKIP" "$(status_of "$D4" model_parity)"
 fi
 
 # ===========================================================================
@@ -892,8 +927,20 @@ if [ "$HAVE_NODE" = "yes" ]; then
     assert_eq "installer-target-functional 7g: after all METAs, the full check set is green again" \
         "0" "$M7G_RC"
 fi
-assert_eq "installer-target-functional 7g: 9 passed, 0 failed after the METAs" \
-    "9 0" "$(jq -r '"\(.passed) \(.failed)"' "$M7G" 2>/dev/null || echo "?")"
+# DERIVED, not a fresh literal (the previous "10" was itself hand-derived
+# from 12 - 2, and a hand-derived number is exactly what went stale when
+# beads_ledger joined the registry the first time). $DOCTOR_CHECK_COUNT is
+# now 13; mcp_bd and mcp_code_graph are explicitly --skip'd (2); model_parity
+# self-SKIPs on this cache-less target for the same reason it does in
+# Section 4 (see that section's note) — a SKIP, not a FAIL, so it moves the
+# PASSED total down by one more (2 + 1 = 3 non-passing) without touching
+# FAILED at all. The pair below is "10 0" by construction, unchanged from
+# before model_parity existed, but for a different reason: previously
+# 12 - 2 = 10 with nothing else to account for; now 13 - 2 - 1 = 10 with the
+# self-skip absorbing the extra registry slot.
+assert_eq "installer-target-functional 7g: after the METAs, everything but mcp_bd/mcp_code_graph (skipped) and model_parity (self-skipped, no cache on this target) passed, and nothing FAILED" \
+    "$((DOCTOR_CHECK_COUNT - 3)) 0" \
+    "$(jq -r '"\(.passed) \(.failed)"' "$M7G" 2>/dev/null || echo "?")"
 
 # ===========================================================================
 # Section 8: installer-level META — a JSONC settings.json is now LOUD

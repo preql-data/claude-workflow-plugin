@@ -60,6 +60,29 @@ INSTALL_SH="$PROJECT_DIR/install.sh"
 # reliably prereq-hostile — but section 3 verifies that rather than assuming it.
 MINIMAL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
+# NEUTRALISE THE REAL beads INSTALLER BEFORE ANY INVOCATION RUNS.
+# install.sh's beads-upgrade step executes `sh -c "$BD_UPGRADE_COMMAND"`, whose
+# default is `curl -fsSL .../beads/main/scripts/install.sh | bash` — the real
+# upstream installer, which writes a bd binary over whatever is on PATH. This
+# spec invokes install.sh 27 times and, until 2026-10-02, stubbed that command
+# ZERO times, so any invocation reaching a complete install replaced the HOST's
+# bd with whatever beads had most recently released.
+#
+# MEASURED, which is how this was found (claude-workflow-plugin-wyt3): running
+# this spec in a container with bd 1.1.2 installed at /usr/local/bin left
+# /usr/local/bin/bd at version 1.3.1, sha256 1db3b1b5… -> 21351856…. On CI that
+# is exactly what breaks META-TEST 8a — the l1-unit job pins bd 1.1.2,
+# sha256-verified, and the doctor later measures 1.3.1, because this spec
+# overwrote the pinned binary mid-job. It also explains three unexplained
+# upgrades of a developer's local bd across one work arc.
+#
+# The seam already exists for precisely this reason (see install.sh's
+# BD_UPGRADE_COMMAND header: "a SEAM, not a hardcoded curl"), and the component
+# tier's installer-beads-upgrade.sh already substitutes a fake. This spec is an
+# ARGUMENT-CONTRACT spec; it has no business running a real installer at all,
+# so the seam is closed here unconditionally rather than per-invocation.
+export BD_UPGRADE_COMMAND='true'
+
 WORK=$(mktemp -d -t installer-flags-test.XXXXXX)
 # Invoked indirectly, by the EXIT trap immediately below.
 # shellcheck disable=SC2329
@@ -346,7 +369,7 @@ echo "=== Section 3b: --verify (v4.1 / C0b) ==="
 # A target that carries a STUB workflow-doctor.sh. The stub records the argv it
 # was handed and exits with a code the test chooses, which is what makes
 # "install.sh execs the TARGET's doctor and returns its status" measurable
-# without running an install or a real 11-check doctor.
+# without running an install or a real 13-check doctor.
 VERIFY_TARGET="$WORK/verify-target"
 mkdir -p "$VERIFY_TARGET/.claude/scripts"
 STUB_ARGV="$WORK/stub-argv.txt"
@@ -420,9 +443,10 @@ assert_eq "--upgrade --verify exits 1 (reverse order)" "1" "$RUN_RC"
 # --- ordering: --verify must PRECEDE the prerequisite block ------------------
 # THE POINT OF THE FLAG. `--verify` is what an operator reaches for when the
 # install is broken, and "node is missing" is one of the things it is supposed
-# to tell them — through the doctor's own `deps` check, alongside the other ten.
-# If the prerequisite block ran first, a node-less machine would get
-# "node and npm are REQUIRED" and learn nothing about the other ten checks.
+# to tell them — through the doctor's own `deps` check, alongside every other
+# check in the registry. If the prerequisite block ran first, a node-less
+# machine would get "node and npm are REQUIRED" and learn nothing about the
+# rest of the install's health.
 if [ "$BD_HIDDEN" != "yes" ]; then
     echo "  SKIPPED: bd resolves under $MINIMAL_PATH; cannot stage a prereq-hostile run here"
 else
@@ -481,10 +505,34 @@ mkdir -p "$SYNTH/.claude/agents" "$SYNTH/.claude/scripts" "$SYNTH/.claude/hooks"
     "$SYNTH/.claude/vendor/superpowers/brainstorming" \
     "$SYNTH/.claude/mcp/bd-mcp" "$SYNTH/.claude/mcp/code-graph-mcp" \
     "$SYNTH/.claude-plugin" "$SYNTH/docs" "$SYNTH/bin"
-for agent in orchestrator qa backend frontend devops; do
-    printf -- '---\nmodel: test\n---\nsynthetic %s agent\n' "$agent" \
-        > "$SYNTH/.claude/agents/$agent.md"
-done
+# The synthetic agent set is READ OUT OF install.sh's own required-source
+# list, not spelled out (v5.0.0 / D0).
+#
+# It WAS five names, and it broke the moment D0 added designer.md and
+# design-reviewer.md to that list: install.sh aborted with "Plugin source
+# missing" at the source check, BEFORE the flag-exclusivity flip this section
+# measures, so three METAs failed for a reason that was not their own. That is
+# the same failure this file already documents three times below for the
+# helper list, the vendored tree and the shipped-docs subset — a synthetic
+# source hand-maintained against a list that keeps growing.
+#
+# Deriving it closes the class instead of paying it a fourth time: whatever
+# install.sh requires, the synthetic source now has.
+SYNTH_AGENT_COUNT=0
+while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    SYNTH_AGENT_COUNT=$((SYNTH_AGENT_COUNT + 1))
+    printf -- '---\nmodel: test\n---\nsynthetic %s agent\n' "$(basename "$rel" .md)" \
+        > "$SYNTH/.claude/agents/$(basename "$rel")"
+done <<EOF
+$(sed -n 's/^[[:space:]]*"\(\.claude\/agents\/[^"]*\.md\)"[[:space:]]*\\$/\1/p' "$PROJECT_DIR/install.sh")
+EOF
+# Non-vacuity: if the extraction pattern ever stops matching install.sh's
+# formatting it yields ZERO agents, the synthetic source is unusable, and every
+# META below fails opaquely at the source check. Fail here instead, where the
+# message says what actually went wrong.
+assert_eq "synthetic source: agent list extracted from install.sh's required list (>= 5)" \
+    "yes" "$([ "$SYNTH_AGENT_COUNT" -ge 5 ] && echo yes || echo "no($SYNTH_AGENT_COUNT)")"
 # Every helper on install.sh's required-source list. workflow-doctor joined it
 # in v4.1 / C0a; a missing entry aborts the mutant run with "Plugin source
 # missing" before the exit-code flip this section measures can happen.
@@ -523,16 +571,37 @@ printf 'synthetic hooks reference\n' > "$SYNTH/docs/HOOKS.md"
 # fake-bd: the whole `bd` surface install.sh touches (--version, init, hooks,
 # doctor). `doctor` must never print the string 'error' — install.sh greps for
 # it case-insensitively.
-cat > "$SYNTH/bin/bd" <<'FAKE_BD'
+# The fixture must report a version AT OR ABOVE the floor, and that version is
+# DERIVED from the doctor's validated set rather than hardcoded, so bumping the
+# set cannot leave this fixture pinned to a version the release no longer
+# validates. The set's HIGHEST member is taken — any validated member clears the
+# floor, and tracking the ceiling keeps the fixture representative of what a
+# current install actually has.
+#
+# This line said `bd 0.99.0` until 2026-10-02, which sorts BELOW the 1.1.2 floor
+# and so drove install.sh into its beads-upgrade arm on every invocation — the
+# arm that ran an unpinned `curl | bash` and replaced the HOST's bd
+# (claude-workflow-plugin-wyt3). An argument-contract spec has no business
+# manufacturing a below-floor install.
+FIXTURE_BD_VER=$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' \
+    "$PROJECT_DIR/.claude/scripts/workflow-doctor.sh" 2>/dev/null \
+    | head -1 | tr ' ' '\n' | cut -d: -f1 | grep -E '^[0-9]' | sort -V | tail -1)
+assert_eq "8.0 the fixture's bd version is derivable from the validated set (else the fixture is vacuous)" \
+    "yes" "$([ -n "$FIXTURE_BD_VER" ] && echo yes || echo no)"
+: "${FIXTURE_BD_VER:=1.3.0}"
+
+cat > "$SYNTH/bin/bd" <<FAKE_BD
 #!/bin/bash
-case "${1:-}" in
-    --version|-v|version) printf 'bd 0.99.0 (fake-bd for installer-flags)\n' ;;
+case "\${1:-}" in
+    --version|-v|version) printf 'bd $FIXTURE_BD_VER (fake-bd for installer-flags)\n' ;;
     doctor)               printf 'fake-bd: all checks passed\n' ;;
-    *)                    printf 'fake-bd: ok (%s)\n' "${1:-}" ;;
+    *)                    printf 'fake-bd: ok (%s)\n' "\${1:-}" ;;
 esac
 exit 0
 FAKE_BD
 chmod +x "$SYNTH/bin/bd"
+assert_eq "8.0b ...and the generated fixture really reports it" "yes" \
+    "$("$SYNTH/bin/bd" --version 2>/dev/null | grep -qF "bd $FIXTURE_BD_VER" && echo yes || echo no)"
 
 MUTANT_TARGET="$WORK/mutant-target"
 mkdir -p "$MUTANT_TARGET"
@@ -643,6 +712,406 @@ assert_eq "META-TEST control: ...refusing for the documented reason" "yes" \
     "$(contains "$RUN_OUT" "$EXCLUSIVITY_MSG")"
 assert_eq "META-TEST control: ...and never reaches the doctor" "no" \
     "$(contains "$RUN_OUT" "stub-doctor ran")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Section 9: a bd below the floor is REFUSED, not warned (wyt3) ==="
+
+# v5 requires bd >= RECOMMENDED_BD_VERSION. Continuing on an older bd would
+# write v5 over a working v4.1 install into a storage configuration v5 does not
+# support, and only the POST-install doctor would notice — warning where the
+# installer must refuse (claude-workflow-plugin-q5l6). The refusal has to land
+# BEFORE anything is written, or "nothing has been changed" is a false claim.
+OLD_BD_DIR="$WORK/old-bd-bin"
+mkdir -p "$OLD_BD_DIR"
+cat > "$OLD_BD_DIR/bd" <<'OLD_BD'
+#!/bin/bash
+case "${1:-}" in
+    --version|-v|version) printf 'bd 0.47.1 (fake old bd)\n' ;;
+    doctor)               printf 'fake-bd: all checks passed\n' ;;
+    *)                    printf 'fake-bd: ok (%s)\n' "${1:-}" ;;
+esac
+exit 0
+OLD_BD
+chmod +x "$OLD_BD_DIR/bd"
+
+FLOOR_TARGET="$WORK/floor-target"
+mkdir -p "$FLOOR_TARGET"
+FLOOR_OUT=$(env PATH="$OLD_BD_DIR:$PATH" "$BASH_BIN" "$INSTALL_SH" "$FLOOR_TARGET" </dev/null 2>&1)
+FLOOR_RC=$?
+
+assert_eq "9.1 a bd below the floor makes the installer EXIT NON-ZERO" "yes" \
+    "$([ "$FLOOR_RC" -ne 0 ] && echo yes || echo no)"
+assert_eq "9.2 ...and says it is REFUSING, not warning" "yes" \
+    "$(contains "$FLOOR_OUT" "REFUSING to install")"
+assert_eq "9.3 ...and NOTHING was written into the target (no .claude/)" "no" \
+    "$([ -d "$FLOOR_TARGET/.claude" ] && echo yes || echo no)"
+assert_eq "9.4 ...and it names the one-way storage migration" "yes" \
+    "$(contains "$FLOOR_OUT" "ONE WAY")"
+assert_eq "9.5 ...and tells the operator to back up .beads FIRST" "yes" \
+    "$(contains "$FLOOR_OUT" "Back up your issues FIRST")"
+# PINNED, not latest: printing an install-latest command recreates by hand the
+# moving target the automatic path was removed for.
+BRIDGE_VER=$(sed -n 's/^BRIDGE_BD_VERSION="\(.*\)"$/\1/p' "$INSTALL_SH" | head -1)
+assert_eq "9.6a the bridge version is readable from install.sh (else 9.6b is vacuous)" "yes" \
+    "$([ -n "$BRIDGE_VER" ] && echo yes || echo no)"
+assert_eq "9.6b ...and the refusal points at that EXACT pinned release, not install-latest" "yes" \
+    "$(contains "$FLOOR_OUT" "releases/tag/v$BRIDGE_VER")"
+
+# THE BRIDGE IS PINNED, AND THIS IS WHAT STOPS THE PIN GOING STALE SILENTLY.
+# "Can migrate a 0.47.x store" was MEASURED on specific versions; it is not
+# implied by membership of the validated set, nor by being its lowest member.
+# If the set ever stops containing the bridge, the printed instruction is
+# telling operators to install a version this release no longer validates, and
+# a newer bd REFUSES a 0.47.x workspace outright. Failing here forces a
+# re-measurement instead of a silent change (claude-workflow-plugin-wyt3).
+VALIDATED_SET=$(sed -n 's/^DOCTOR_BD_SCHEMA_VALIDATED="\(.*\)"$/\1/p' \
+    "$PROJECT_DIR/.claude/scripts/workflow-doctor.sh" 2>/dev/null | head -1)
+assert_eq "9.6c the validated set is readable (else 9.6d is vacuous)" "yes" \
+    "$([ -n "$VALIDATED_SET" ] && echo yes || echo no)"
+assert_eq "9.6d ...and the PINNED bridge version is still a member of it" "yes" \
+    "$(printf '%s' "$VALIDATED_SET" | tr ' ' '\n' | cut -d: -f1 | grep -qxF "$BRIDGE_VER" && echo yes || echo no)"
+
+# DRY RUN BEFORE APPLY, IN THAT ORDER. "nothing was discarded" was the result on
+# a 3-issue fixture, not a guarantee for anyone's ledger; --apply was made
+# explicit precisely so a write's effect is visible first.
+assert_eq "9.8a the procedure names the dry-run reconcile" "yes" \
+    "$(contains "$FLOOR_OUT" "beads-ledger.sh reconcile")"
+assert_eq "9.8b ...and the --apply form too" "yes" \
+    "$(contains "$FLOOR_OUT" "beads-ledger.sh reconcile --apply")"
+# ORDER, not mere presence: the bare form must appear BEFORE the --apply form.
+FLOOR_DRY_LINE=$(printf '%s\n' "$FLOOR_OUT" | grep -n 'beads-ledger\.sh reconcile$' | head -1 | cut -d: -f1)
+FLOOR_APPLY_LINE=$(printf '%s\n' "$FLOOR_OUT" | grep -n 'beads-ledger\.sh reconcile --apply' | head -1 | cut -d: -f1)
+assert_eq "9.8c NON-VACUITY: both reconcile lines were actually located" "yes" \
+    "$([ -n "$FLOOR_DRY_LINE" ] && [ -n "$FLOOR_APPLY_LINE" ] && echo yes || echo no)"
+assert_eq "9.8d ...and the DRY RUN is printed BEFORE the --apply" "yes" \
+    "$([ -n "$FLOOR_DRY_LINE" ] && [ -n "$FLOOR_APPLY_LINE" ] && [ "$FLOOR_DRY_LINE" -lt "$FLOOR_APPLY_LINE" ] && echo yes || echo no)"
+# The installer's own exit code is part of the procedure, so it must be stated.
+assert_eq "9.9 the procedure warns that the installer EXITS 3 at that point" "yes" \
+    "$(contains "$FLOOR_OUT" "EXITS 3")"
+
+# ---------------------------------------------------------------------------
+# THREE SURFACES, ONE SEQUENCE — CHECKED, NOT ASSERTED IN A COMMENT.
+#
+# A teammate hits this ledger repair from any of three directions: install.sh
+# prints it as step 4 of the cross-era upgrade, install.ps1 prints its own copy
+# of that procedure, and workflow-doctor.sh prints it as the beads_ledger FAIL
+# fix. If any two ever name different commands, or the same commands in a
+# different order, one of them is teaching a dry-run-first discipline another
+# quietly skips. install.ps1 did exactly that until claude-workflow-plugin-i4ac:
+# its step 4 went straight to --apply. 9.10d-e check it; 9.15 checks the rest of
+# its procedure line for line.
+#
+# This replaces a comment that said the two "must not diverge". A note telling
+# future editors to keep two copies in step is exactly the mechanism behind this
+# release's tally drift, its duplicated rubric pin, and its four copies of the
+# doctor's side-effect inventory — in every case the note survived and the
+# agreement did not. One assertion outlives the note.
+# Scoped to RUNNABLE COMMAND LINES — two-space-indented `bash ...` — not to
+# every mention of the string. The first version of this grepped the whole file
+# and picked up a PROSE reference ("written only by an explicit
+# `beads-ledger.sh reconcile --apply`") that sits above the fix blocks, so it
+# reported a divergence that did not exist. The assertion caught that itself,
+# which is the point: a comment saying the two must agree could not have.
+DOCTOR_SH="$PROJECT_DIR/.claude/scripts/workflow-doctor.sh"
+DOC_SEQ=$(grep -oE '^  bash \.claude/scripts/beads-ledger\.sh reconcile( --apply)?$' "$DOCTOR_SH" 2>/dev/null \
+    | sed 's/^  bash \.claude\/scripts\///' | awk '!seen[$0]++')
+INST_SEQ=$(printf '%s\n' "$FLOOR_OUT" | grep -oE 'beads-ledger\.sh reconcile( --apply)?' | awk '!seen[$0]++')
+assert_eq "9.10a NON-VACUITY: both surfaces actually name the reconcile command" "yes" \
+    "$([ -n "$DOC_SEQ" ] && [ -n "$INST_SEQ" ] && echo yes || echo no)"
+assert_eq "9.10b the doctor's fix lines and the installer's steps name the SAME commands in the SAME order" \
+    "$INST_SEQ" "$DOC_SEQ"
+# And that shared order is dry-run first, in BOTH — checked on the doctor side
+# here, since 9.8d already pins the installer side.
+assert_eq "9.10c ...and the doctor leads with the DRY RUN, not --apply" \
+    "beads-ledger.sh reconcile" "$(printf '%s\n' "$DOC_SEQ" | head -1)"
+
+# The third surface. install.ps1's text is READ from the file, not run: this
+# suite never executes install.ps1 (9.15 says why). ps1_procedure renders its
+# printed steps 1-4 from source: each line is one `Write-Host "..."`, with
+# PowerShell's backtick escapes undone, the pinned bridge substituted, and the
+# installer's own re-run and check commands left as <RERUN> / <VERIFY>.
+PS1_FILE="$PROJECT_DIR/install.ps1"
+# Every `$` in the sed scripts below is PowerShell source being MATCHED, not a
+# shell expansion, so the single quotes are the point.
+# shellcheck disable=SC2016
+ps1_procedure() { # <path to an install.ps1>
+    local bridge
+    bridge=$(sed -n 's/^\$BridgeBdVersion = "\(.*\)"$/\1/p' "$1" | head -1)
+    awk '/^function Invoke-RefuseBelowFloor/{f=1} f && /Write-Host "    1\. Back up/{p=1} p{print} p && /Get-InstallerRerunCommand -Check/{exit}' "$1" \
+        | sed -e 's/^[[:space:]]*Write-Host "//' -e 's/"$//' \
+              -e 's/`"/"/g' -e 's/`\$/$/g' \
+              -e "s/\\\$BridgeBdVersion/$bridge/g" \
+              -e 's/\$(Get-InstallerRerunCommand -Check)/<VERIFY>/' \
+              -e 's/\$(Get-InstallerRerunCommand)/<RERUN>/'
+}
+PS1_PROC=$(ps1_procedure "$PS1_FILE")
+PS1_SEQ=$(printf '%s\n' "$PS1_PROC" | grep -oE 'beads-ledger\.sh reconcile( --apply)?' | awk '!seen[$0]++')
+assert_eq "9.10d NON-VACUITY: install.ps1's procedure was rendered and names the reconcile command" "yes" \
+    "$([ -n "$PS1_SEQ" ] && echo yes || echo no)"
+assert_eq "9.10e install.ps1 names the SAME commands in the SAME order: the dry run, then --apply (i4ac)" \
+    "$DOC_SEQ" "$PS1_SEQ"
+assert_eq "9.7 ...and does NOT print an install-latest pipe-to-shell command" "no" \
+    "$(contains "$FLOOR_OUT" "scripts/install.sh | bash")"
+
+# NEGATIVE CONTROL: the refusal must be caused by the OLD bd, not by this
+# fixture shape. Same invocation, same target, a bd AT the floor instead.
+NEW_BD_DIR="$WORK/new-bd-bin"
+mkdir -p "$NEW_BD_DIR"
+sed 's/bd 0\.47\.1 (fake old bd)/bd 1.3.0 (fake current bd)/' "$OLD_BD_DIR/bd" > "$NEW_BD_DIR/bd"
+chmod +x "$NEW_BD_DIR/bd"
+assert_eq "9.C0 NON-VACUITY: the control fixture really reports a different version" "yes" \
+    "$("$NEW_BD_DIR/bd" --version | grep -q '1\.3\.0' && echo yes || echo no)"
+CTRL_TARGET="$WORK/floor-control-target"
+mkdir -p "$CTRL_TARGET"
+CTRL_OUT=$(env PATH="$NEW_BD_DIR:$PATH" "$BASH_BIN" "$INSTALL_SH" "$CTRL_TARGET" </dev/null 2>&1)
+assert_eq "9.C1 CONTROL: a bd at the floor is NOT refused" "no" \
+    "$(contains "$CTRL_OUT" "REFUSING to install")"
+
+# NO PATH ADMITS A BD BELOW THE FLOOR (claude-workflow-plugin-ishe R5-F1).
+# --skip-beads-upgrade / CWP_SKIP_BEADS_UPGRADE=1 used to return before the
+# version was compared, which installed v5 over a fake 0.47.1 (6965 files,
+# exit 3, measured by the review). Every failed opt-in step returned and
+# continued on the old bd as well. Each leg below runs the SHIPPED installer
+# end to end and must be refused, with nothing written. 9.14 is the runner's
+# own stub (BD_UPGRADE_COMMAND=true) plus the opt-in: a no-op "upgrade" that
+# used to report "still 0.47.1" and then carry on installing.
+refused_cleanly() { # <label-prefix> <out> <rc> <target>
+    local claude_state
+    if [ ! -d "$4" ]; then
+        claude_state="TARGET-MISSING"   # no target means "no .claude/" proves nothing
+    elif [ -e "$4/.claude" ]; then
+        claude_state="yes"
+    else
+        claude_state="no"
+    fi
+    assert_eq "$1 ...exits non-zero" "yes" "$([ "$3" -ne 0 ] && echo yes || echo no)"
+    assert_eq "$1 ...says it is REFUSING" "yes" "$(contains "$2" "REFUSING to install")"
+    assert_eq "$1 ...and wrote no .claude/ into the target" "no" "$claude_state"
+}
+SKIPF_T="$WORK/floor-skip-flag-target"; mkdir -p "$SKIPF_T"
+SKIPF_OUT=$(env PATH="$OLD_BD_DIR:$PATH" CWP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" --skip-beads-upgrade "$SKIPF_T" </dev/null 2>&1); SKIPF_RC=$?
+refused_cleanly "9.11 --skip-beads-upgrade on bd 0.47.1, opt-in also set:" "$SKIPF_OUT" "$SKIPF_RC" "$SKIPF_T"
+assert_eq "9.11 ...and names the flag as not admitting the old bd" "yes" \
+    "$(contains "$SKIPF_OUT" "does not admit a bd below")"
+
+SKIPE_T="$WORK/floor-skip-env-target"; mkdir -p "$SKIPE_T"
+SKIPE_OUT=$(env PATH="$OLD_BD_DIR:$PATH" CWP_SKIP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" "$SKIPE_T" </dev/null 2>&1); SKIPE_RC=$?
+refused_cleanly "9.12 CWP_SKIP_BEADS_UPGRADE=1 on bd 0.47.1:" "$SKIPE_OUT" "$SKIPE_RC" "$SKIPE_T"
+
+OPTF_T="$WORK/floor-optin-fails-target"; mkdir -p "$OPTF_T"
+OPTF_OUT=$(env PATH="$OLD_BD_DIR:$PATH" BD_UPGRADE_COMMAND=false CWP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" "$OPTF_T" </dev/null 2>&1); OPTF_RC=$?
+refused_cleanly "9.13 opt-in whose upgrade command FAILS:" "$OPTF_OUT" "$OPTF_RC" "$OPTF_T"
+assert_eq "9.13 ...and it does not claim to be continuing" "no" \
+    "$(contains "$OPTF_OUT" "Continuing on bd")"
+
+OPTN_T="$WORK/floor-optin-noop-target"; mkdir -p "$OPTN_T"
+OPTN_OUT=$(env PATH="$OLD_BD_DIR:$PATH" BD_UPGRADE_COMMAND=true CWP_BEADS_UPGRADE=1 "$BASH_BIN" "$INSTALL_SH" "$OPTN_T" </dev/null 2>&1); OPTN_RC=$?
+refused_cleanly "9.14 opt-in with the runner's no-op stub (bd stays 0.47.1):" "$OPTN_OUT" "$OPTN_RC" "$OPTN_T"
+
+# CONTROL for 9.11-9.12: the skip flag on a bd AT the floor is not refused, so
+# those legs fail because the bd is old, not because the flag refuses.
+SKIPC_T="$WORK/floor-skip-control-target"; mkdir -p "$SKIPC_T"
+SKIPC_OUT=$(env PATH="$NEW_BD_DIR:$PATH" "$BASH_BIN" "$INSTALL_SH" --skip-beads-upgrade "$SKIPC_T" </dev/null 2>&1)
+assert_eq "9.C2 CONTROL: --skip-beads-upgrade on a bd at the floor is NOT refused" "no" \
+    "$(contains "$SKIPC_OUT" "REFUSING to install")"
+assert_eq "9.C2 CONTROL: ...and it really installed (.claude/ present)" "yes" \
+    "$([ -d "$SKIPC_T/.claude" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 9.15 — ONE PROCEDURE, TWO INSTALLERS (claude-workflow-plugin-i4ac).
+#
+# install.ps1 printed its own older copy of the cross-era procedure: no dry run
+# before --apply, no exit code, the floor where the pinned bridge belongs, and a
+# weaker reason not to install the newest bd. A comment asking two copies to
+# stay in step is how that happened, so this compares them LINE FOR LINE. Only
+# these differ, by design, and are mapped before comparing:
+#   - install.sh's em-dash is "-" in install.ps1, whose output stays ASCII;
+#   - the backup line and the `cd <project>; bd bootstrap` line use
+#     PowerShell's own syntax;
+#   - the re-run and check commands are each installer's own, compared here
+#     as <RERUN> / <VERIFY> (9.16 checks the bash ones).
+# HALF OF THIS IS A DOCUMENT CHECK, AND IT SAYS SO. The install.sh side RUNS
+# (FLOOR_OUT is the shipped installer's own output). The install.ps1 side is
+# READ from source: install.ps1 is never executed by this suite or anywhere
+# else, and running it here, even under pwsh on Linux, would falsify the
+# release text's "never executed on any host". The META below proves the
+# comparison can fail. Nothing here proves PowerShell renders the strings as
+# they read.
+sh_procedure() { # <installer output>: steps 1-4 as printed, re-run/check as placeholders
+    printf '%s\n' "$1" | awk '
+        /^    1\. Back up/ { p = 1 }
+        p && rerun  { print "         <RERUN>"; rerun = 0; next }
+        p && verify { print "         <VERIFY>"; exit }
+        p { print }
+        p && /# rebuilds from the ledger$/ { rerun = 1 }
+        p && /Then re-run the check:$/ { verify = 1 }'
+}
+# The `$(...)` on both sides of this sed are TEXT the two installers print.
+# shellcheck disable=SC2016
+ps1_mapped() { # <rendered install.ps1 procedure>: PowerShell syntax mapped to bash's
+    printf '%s\n' "$1" | sed \
+        -e 's#^         Copy-Item -Recurse \.beads "\.beads\.backup-\$(Get-Date -Format yyyyMMdd)"$#         cp -R .beads .beads.backup-$(date +%Y%m%d)#' \
+        -e 's#^         cd <project>; bd bootstrap #         cd <project> \&\& bd bootstrap #'
+}
+SH_PROC=$(sh_procedure "$FLOOR_OUT" | sed 's/—/-/g')
+PS1_PROC_MAPPED=$(ps1_mapped "$PS1_PROC")
+assert_eq "9.15a NON-VACUITY: both procedures were rendered, steps 1 to 4, each ending in its check" "yes" \
+    "$([ "$(printf '%s\n' "$SH_PROC" | grep -c .)" -gt 20 ] \
+        && printf '%s\n' "$SH_PROC" | grep -qxF '         <VERIFY>' \
+        && printf '%s\n' "$PS1_PROC_MAPPED" | grep -qxF '         <VERIFY>' && echo yes || echo no)"
+assert_eq "9.15b install.ps1 prints install.sh's procedure LINE FOR LINE (only the mapped platform lines differ)" \
+    "$SH_PROC" "$PS1_PROC_MAPPED"
+# shellcheck disable=SC2016  # `$BridgeBdVersion` is PowerShell source being matched
+assert_eq "9.15c ...and the two installers pin the SAME bridge version" "$BRIDGE_VER" \
+    "$(sed -n 's/^\$BridgeBdVersion = "\(.*\)"$/\1/p' "$PS1_FILE" | head -1)"
+# META: a copy of install.ps1 that skips the dry run, which is i4ac's defect.
+PS1_MUT="$WORK/install.ps1.no-dry-run"
+awk '/Write-Host "         bash \.claude\/scripts\/beads-ledger\.sh reconcile"$/ && !done { done = 1; next }
+     { print }
+     END { if (!done) exit 7 }' "$PS1_FILE" > "$PS1_MUT"; PS1_MUT_RC=$?
+assert_eq "9.15 META non-vacuity: the dry-run line was found and dropped from the mutant copy" "0" "$PS1_MUT_RC"
+assert_eq "9.15 META non-vacuity: ...so the mutant really differs from the shipped file" "yes" \
+    "$(cmp -s "$PS1_FILE" "$PS1_MUT" && echo no || echo yes)"
+assert_eq "9.15 META specific misbehaviour: a procedure that skips the dry run FAILS 9.15b" "no" \
+    "$([ "$(ps1_mapped "$(ps1_procedure "$PS1_MUT")")" = "$SH_PROC" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 9.16 — THE RE-RUN THE PROCEDURE PRINTS (claude-workflow-plugin-s229).
+#
+# The procedure is addressed to people on bd 0.47.x, and they install with the
+# README's curl one-liner: they have NO local install.sh. Until s229, steps 3
+# and 4 printed `bash install.sh <project>` regardless, so step 3 of a one-way
+# migration pointed the very people it addresses at a file that does not
+# exist. The end-to-end measurement ran from a clone and could not see that.
+# These legs run the SHIPPED installer down the path those people take, the
+# script fed to bash on stdin, which is exactly what `curl ... | bash` does. The
+# refusal fires before any source is fetched, so nothing touches the network.
+CURL_T="$WORK/floor-curl-target"; mkdir -p "$CURL_T"
+CURL_OUT=$(cd "$CURL_T" && env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH PATH="$OLD_BD_DIR:$PATH" \
+    "$BASH_BIN" -s < "$INSTALL_SH" 2>&1); CURL_RC=$?
+refused_cleanly "9.16 the shipped installer fed to bash on stdin (curl | bash), bd 0.47.1:" "$CURL_OUT" "$CURL_RC" "$CURL_T"
+RAW_MAIN="https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/main/install.sh"
+assert_eq "9.16a step 3 re-runs the installer with the curl one-liner" "yes" \
+    "$(printf '%s\n' "$CURL_OUT" | grep -qxF "         curl -fsSL $RAW_MAIN | bash" && echo yes || echo no)"
+assert_eq "9.16b ...and step 4's check is that one-liner with --verify" "yes" \
+    "$(printf '%s\n' "$CURL_OUT" | grep -qxF "         curl -fsSL $RAW_MAIN | bash -s -- --verify" && echo yes || echo no)"
+assert_eq "9.16c ...and no line sends the curl user to a local install.sh" "no" \
+    "$(printf '%s\n' "$CURL_OUT" | grep -qE 'bash [^ ]*install\.sh' && echo yes || echo no)"
+BR_T="$WORK/floor-curl-branch-target"; mkdir -p "$BR_T"
+BR_OUT=$(cd "$BR_T" && env -u CLAUDE_WORKFLOW_REPO PATH="$OLD_BD_DIR:$PATH" CLAUDE_WORKFLOW_BRANCH=feature/x \
+    "$BASH_BIN" -s < "$INSTALL_SH" 2>&1)
+assert_eq "9.16d a run started against a branch re-runs THAT branch, not main" "yes" \
+    "$(printf '%s\n' "$BR_OUT" | grep -qxF "         curl -fsSL https://raw.githubusercontent.com/preql-data/claude-workflow-plugin/feature/x/install.sh | CLAUDE_WORKFLOW_BRANCH=feature/x bash" && echo yes || echo no)"
+INSTALL_DIR_ABS=$(cd "$(dirname "$INSTALL_SH")" && pwd)
+assert_eq "9.16e run from a clone, step 3 names that clone's installer by ABSOLUTE path (step 1 has cd'd away from it)" "yes" \
+    "$(printf '%s\n' "$FLOOR_OUT" | grep -qxF "         bash \"$INSTALL_DIR_ABS/install.sh\" <project>" && echo yes || echo no)"
+assert_eq "9.16f ...and so does step 4's check" "yes" \
+    "$(printf '%s\n' "$FLOOR_OUT" | grep -qxF "         bash \"$INSTALL_DIR_ABS/install.sh\" --verify <project>" && echo yes || echo no)"
+# META: the pre-s229 behaviour, restored in a copy by making the helper return
+# the old local form at once.
+SH_MUT="$WORK/install.sh.pre-s229"
+# The line is bash SOURCE written into the mutant, so its `$1` must not expand.
+# shellcheck disable=SC2016
+MUT_LINE='    printf '\''bash install.sh%s <project>'\'' "${1:+ $1}"; return 0'
+awk -v line="$MUT_LINE" '{ print } /^installer_rerun_cmd\(\) \{$/ { print line; hit = 1 } END { if (!hit) exit 7 }' \
+    "$INSTALL_SH" > "$SH_MUT"; SH_MUT_RC=$?
+assert_eq "9.16 META non-vacuity: the mutation landed (the old form is returned at the helper's first line)" "0" "$SH_MUT_RC"
+assert_eq "9.16 META non-vacuity: ...and the mutant still parses" "yes" \
+    "$("$BASH_BIN" -n "$SH_MUT" 2>/dev/null && echo yes || echo no)"
+MUT_T="$WORK/floor-curl-mutant-target"; mkdir -p "$MUT_T"
+MUT_OUT=$(cd "$MUT_T" && env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH PATH="$OLD_BD_DIR:$PATH" \
+    "$BASH_BIN" -s < "$SH_MUT" 2>&1)
+assert_eq "9.16 META specific misbehaviour: run the curl way, the pre-s229 installer sends the curl user to a local install.sh, so 9.16c goes red" "yes" \
+    "$(printf '%s\n' "$MUT_OUT" | grep -qxF '         bash install.sh <project>' && echo yes || echo no)"
+assert_eq "9.16 META specific misbehaviour: ...and prints no curl one-liner, so 9.16a goes red too" "no" \
+    "$(printf '%s\n' "$MUT_OUT" | grep -qF "curl -fsSL $RAW_MAIN" && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 9.17 — cd BEFORE THE BACKUP (claude-workflow-plugin-s229). With the copy
+# first, a cp run from the wrong directory fails, and a hurried operator carries
+# on into a one-way migration with no backup.
+step1_order() { # <installer output>: "cd backup flush" line numbers
+    local out="$1" cd_n cp_n fl_n
+    cd_n=$(printf '%s\n' "$out" | grep -nxF '         cd <project>' | head -1 | cut -d: -f1)
+    cp_n=$(printf '%s\n' "$out" | grep -nF 'cp -R .beads .beads.backup-' | head -1 | cut -d: -f1)
+    fl_n=$(printf '%s\n' "$out" | grep -nF 'bd sync --flush-only' | head -1 | cut -d: -f1)
+    printf '%s %s %s' "${cd_n:-x}" "${cp_n:-x}" "${fl_n:-x}"
+}
+read -r S1_CD S1_CP S1_FL <<< "$(step1_order "$CURL_OUT")"
+assert_eq "9.17a NON-VACUITY: step 1's cd, backup and flush lines were all located" "yes" \
+    "$([ "$S1_CD" != x ] && [ "$S1_CP" != x ] && [ "$S1_FL" != x ] && echo yes || echo no)"
+assert_eq "9.17b step 1 changes into the project BEFORE it copies .beads" "yes" \
+    "$([ "$S1_CD" != x ] && [ "$S1_CP" != x ] && [ "$S1_CD" -lt "$S1_CP" ] && echo yes || echo no)"
+assert_eq "9.17c ...and copies .beads BEFORE the flush" "yes" \
+    "$([ "$S1_CP" != x ] && [ "$S1_FL" != x ] && [ "$S1_CP" -lt "$S1_FL" ] && echo yes || echo no)"
+# META: the backup-first order, restored in a copy.
+SWAP_MUT="$WORK/install.sh.backup-first"
+awk '/^    echo "         cd <project>"$/ && !held { held = $0; next }
+     held && /cp -R \.beads \.beads\.backup-/ { print; print held; held = ""; swapped = 1; next }
+     { print }
+     END { if (!swapped) exit 7 }' "$INSTALL_SH" > "$SWAP_MUT"; SWAP_RC=$?
+assert_eq "9.17 META non-vacuity: the cd and backup lines were found and swapped in the mutant copy" "0" "$SWAP_RC"
+SWAP_T="$WORK/floor-swap-mutant-target"; mkdir -p "$SWAP_T"
+SWAP_OUT=$(cd "$SWAP_T" && env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH PATH="$OLD_BD_DIR:$PATH" \
+    "$BASH_BIN" -s < "$SWAP_MUT" 2>&1)
+read -r M1_CD M1_CP _ <<< "$(step1_order "$SWAP_OUT")"
+assert_eq "9.17 META specific misbehaviour: the backup-first copy prints the copy before the cd, so 9.17b goes red" "yes" \
+    "$([ "$M1_CD" != x ] && [ "$M1_CP" != x ] && [ "$M1_CP" -lt "$M1_CD" ] && echo yes || echo no)"
+
+# ---------------------------------------------------------------------------
+# 9.18 — THE RE-CHECK HINTS AT THE END OF STEP 3 (claude-workflow-plugin-s229).
+# Step 3's re-run is EXPECTED to exit 3, and a failed post-install check ends
+# with two "re-verify" hints. The end-to-end curl measurement caught both still
+# printing `bash install.sh --verify "<target>"` to a curl user, straight after
+# a procedure that had just told them how to check. They now print
+# installer_check_cmd: from a checkout, that checkout's installer by absolute
+# path with the target; under curl | bash, a cd into the target and the
+# one-liner's --verify.
+# Checkout side: the shipped installer, run in full by 9.C2, whose fake bd
+# makes the post-install check fail (exit 3).
+SKIPC_ABS=$(cd "$SKIPC_T" && pwd)
+after_line() { printf '%s\n' "$1" | awk -v pat="$2" 'found { print; exit } index($0, pat) { found = 1 }'; }
+assert_eq "9.18a NON-VACUITY: 9.C2's install really ended in a failed post-install check" "yes" \
+    "$(contains "$SKIPC_OUT" "VERIFICATION FAILED")"
+assert_eq "9.18b its after-fixing hint names this checkout's installer by absolute path, with the target" \
+    "  bash \"$INSTALL_DIR_ABS/install.sh\" --verify \"$SKIPC_ABS\"" \
+    "$(after_line "$SKIPC_OUT" "After fixing, re-verify without reinstalling:")"
+assert_eq "9.18c ...and so does the final banner's re-run hint" \
+    "    bash \"$INSTALL_DIR_ABS/install.sh\" --verify \"$SKIPC_ABS\"" \
+    "$(after_line "$SKIPC_OUT" "or re-run:")"
+# Curl side: install.sh's own two helpers, extracted verbatim and run with
+# SCRIPT_DIR empty, as `curl ... | bash` leaves it. A full curl-mode install
+# would clone from the network, which this tier does not touch.
+HELPERS="$WORK/rerun-helpers.sh"
+{
+    printf '%s\n' 'SCRIPT_DIR=""'
+    grep -E '^REPO_(URL|BRANCH)=' "$INSTALL_SH"
+    awk '/^installer_rerun_cmd\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALL_SH"
+    awk '/^installer_check_cmd\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$INSTALL_SH"
+} > "$HELPERS"
+assert_eq "9.18d NON-VACUITY: both helpers and both repo defaults were extracted" "4" \
+    "$(grep -cE '^(installer_(rerun|check)_cmd\(\) \{|REPO_(URL|BRANCH)=)' "$HELPERS")"
+# shellcheck disable=SC2016  # $1 is the inner shell's argument, not this one's
+CURL_CHECK=$(env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH "$BASH_BIN" -c '. "$1"; installer_check_cmd "/srv/my project"' _ "$HELPERS")
+assert_eq "9.18e under curl | bash the re-check hint cds into the target and runs the one-liner's --verify" \
+    "cd \"/srv/my project\" && curl -fsSL $RAW_MAIN | bash -s -- --verify" "$CURL_CHECK"
+# META: the pre-s229 hint, restored in a copy of the extracted helpers.
+MUTC="$WORK/rerun-helpers.pre-s229.sh"
+# shellcheck disable=SC2016  # bash SOURCE written into the mutant
+MUTC_LINE='    printf '\''bash install.sh --verify "%s"'\'' "$1"; return 0'
+awk -v line="$MUTC_LINE" '{ print } /^installer_check_cmd\(\) \{$/ { print line; hit = 1 } END { if (!hit) exit 7 }' \
+    "$HELPERS" > "$MUTC"; MUTC_RC=$?
+assert_eq "9.18 META non-vacuity: the mutation landed at installer_check_cmd's first line" "0" "$MUTC_RC"
+# shellcheck disable=SC2016  # $1 is the inner shell's argument, not this one's
+MUTC_OUT=$(env -u CLAUDE_WORKFLOW_REPO -u CLAUDE_WORKFLOW_BRANCH "$BASH_BIN" -c '. "$1"; installer_check_cmd "/srv/my project"' _ "$MUTC")
+assert_eq "9.18 META specific misbehaviour: the pre-s229 helper gives the bare local form, so 9.18e goes red" \
+    'bash install.sh --verify "/srv/my project"' "$MUTC_OUT"
+# install.ps1 side, READ from source (it never runs): its two hints on the same
+# path call Get-InstallerCheckCommand.
+# shellcheck disable=SC2016  # PowerShell source being matched
+assert_eq "9.18f install.ps1's after-fixing and final-banner hints both call Get-InstallerCheckCommand" "2" \
+    "$(grep -cE '^ +Write-Host "  +\$\(Get-InstallerCheckCommand \$Target\)"$' "$PS1_FILE")"
 
 # --- Summary ---------------------------------------------------------------
 

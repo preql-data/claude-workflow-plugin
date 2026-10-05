@@ -1,0 +1,64 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-8lc1",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "78874c038536e92cf9d77d209a3dc6590a65daa642bfbdd7afeadf3db7f6aa3d",
+  "risk_threshold": "high",
+  "stop_condition": "Every claim the fix rests on is independently measured \u2014 (a) that disabling globasciiranges reproduces macOS bash 3.2 collation semantics rather than manufacturing a condition no real host has, (b) that the SHIPPED explicit-class guard is provably NOT helped by the shopt, (c) that 13w.0 and the non-vacuity legs can actually FAIL when mutated, (d) that a locale-less host still skips with a message naming the real prerequisite \u2014 and no critical/high finding remains in section 13w ability to detect a regression of dolt_hash_looks_valid, nor any weakening of STRICT_SECTIONS.",
+  "verdict": "approve",
+  "iterations": 1,
+  "stopped_by": "stop_condition",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "low",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2799 (claim at :2795-2797, message at :2815)",
+      "evidence": "The probe is `if bash -c 'shopt -p globasciiranges' >/dev/null 2>&1`, which keys on EXIT STATUS. Measured (cwp-l1-repro:1.1.2, bash 5.2.21; and macOS bash 3.2.57, at bcd5396): present+SET -> stdout='shopt -s globasciiranges', exit 0; present+UNSET (`shopt -u globasciiranges; shopt -p globasciiranges`) -> stdout='shopt -u globasciiranges', exit 1; ABSENT (bash 3.2) -> stdout='', exit 1. So exit status cannot separate 'absent' from 'present but already unset' \u2014 only stdout can.",
+      "description": "The probe tests 'the option exists AND is currently set', not 'the option exists'. The comment directly above it claims the opposite in terms: 'The probe below detects CAPABILITY (does this bash even have the option?), never a bash version number, so a future bash that changes the default again is still handled correctly.' FUNCTIONAL IMPACT: none \u2014 when the option is present-but-unset, ranges are already locale-sensitive, so the empty preamble is the correct behaviour and the section still works. DIAGNOSTIC IMPACT: on such a host the precondition line at :2815 prints 'no globasciiranges option on this bash (pre-4.3, e.g. macOS shipped bash 3.2); collation applies unconditionally', which is false about that host. globasciiranges was introduced in bash 4.3 defaulting OFF and only flipped ON in 5.0, so bash 4.3/4.4 hosts hit exactly this branch. Neither supported platform does (macOS 3.2 = genuinely absent; CI ubuntu 5.2.21 = present and set), which is why this is LOW and not blocking. It is recorded because this task exists BECAUSE a precondition message misstated its own cause, and the replacement can misstate the host's bash in the same lines. VERIFIED ONE-LINE FIX: key on stdout instead \u2014 `if [ -n \"$(bash -c 'shopt -p globasciiranges' 2>/dev/null)\" ]; then` \u2014 true for both 'shopt -s' and 'shopt -u' output, false when the option does not exist."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "medium",
+      "location": "commit bcd5396 message, VERIFIED table, 'macOS' row (also repeated in the QA spawn brief)",
+      "evidence": "Measured on this host (macOS 26.0 arm64, bash 3.2.57, bd 1.3.0, dolt 2.3.0), both legs run from the harness scratchpad with CLAUDE_PROJECT_DIR pinned at the repo so the working tree was untouched: `CLAUDE_PROJECT_DIR=<repo> bash <prefix-spec>` -> 'Total: 463 assertion(s) / PASSED: 463', rc=0; `CLAUDE_PROJECT_DIR=<repo> bash <postfix-spec>` -> 'Total: 464 assertion(s) / PASSED: 464', rc=0. prefix blob sha256 aa327d1cff5c80f3467df74ffdc08cd6d3e0006caf40a2cd30c99d5ca787ef48 (bcd5396^), postfix 6eabdf8dcf4cac9493cf72ff503c99bd11260efeba0c38d2e73c33ba0075eb17 (bcd5396). delta=1. Both runs emitted 0 section-skip markers and 0 failures.",
+      "description": "The commit message states 'macOS | 464, section already executed | 464, unchanged'. The true pre-fix macOS total is 463, not 464. The arithmetic is forced: section 13w went from 8 assert_* calls to 9 (13w.0 added; counted with `awk '/--- 13w\\./,/--- 13x\\./' | grep -cE '^ *assert_'` on both blobs), and macOS already executed the section, so macOS necessarily gains exactly one. The error is against the author's own interest \u2014 the corrected row 463 -> 464 shows the new negative control DOES execute on macOS, whereas '464, unchanged' reads as if it does not. It changes no conclusion, and 'Linux matches macOS exactly' remains true post-fix (464 = 464). Recorded because CONTRIBUTING.md 'Every number carries the command that produced it and the commit it was measured at' exists for precisely this, and because the wrong figure was propagated from the commit into the review brief. Correct forward in a task comment; do not rewrite the commit."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/tests/runner-completeness.test.sh:2065 (pre-existing; not introduced by bcd5396)",
+      "evidence": "The gate opens at :2064 `if ! command -v bd >/dev/null 2>&1 || ! command -v dolt >/dev/null 2>&1; then`, `else` at :2066, and its `fi` is at :2958 (located with `awk 'NR>=2064 && NR<=2980 && /^(if|else|fi)/'`). Enumerating the subsections inside that range (`awk 'NR>=2066 && NR<=2958 && /printf -- .\\n--- 13/'`) yields FOURTEEN: 13a, 13b, 13c, 13d, 13e, 13f, 13q, 13r, 13s, 13t, 13u, 13v, 13w, 13x. The skip message says: 'SKIPPED: bd and/or dolt not on PATH \u2014 the store-canary legs (13a-13e) need both'.",
+      "description": "The gate's own skip message understates its scope by nine subsections, including 13w \u2014 the section this task is about. A reader who trusts the message concludes 13w runs without dolt; it does not. This is not hypothetical: the task's own `QA-GATE CHOICE continue` comment and the commit message's 'A MEASUREMENT ERROR OF MINE' section both record three verification iterations lost to exactly this, with the spec reporting 332 assertions instead of 464 in a dolt-less image \u2014 'a setup failure rendering identically to a measurement'. The message is one line, in the file this change already touches. Not blocking: pre-existing and outside the task's stated scope, and widening the change set at approval time carries its own risk. Suggested wording: name the families (13a-13f store-canary, 13q-13x) or say 'section 13 in full'."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "medium",
+      "location": "claude-workflow-plugin-8lc1 (task record) / process",
+      "evidence": "No `COMPLETION v1` record exists on the task. Verified by reading the whole comment stream (`bd show claude-workflow-plugin-8lc1 --json --include-comments | jq` filtering for ^(COMPLETION|REVIEW-ARTIFACT|GREEN-CHECK|RUBRIC|QA-GATE)): the only matching record is one `QA-GATE CHOICE continue` at 2026-09-28T13:47:47Z. `bd_doc_read(list_only=true)` returns one doc, `main` (notes), and no `spec`. The commit is authored by the orchestrator directly.",
+      "description": "The change was authored and committed without a delegated specialist spawn, so no F7 completion contract was recorded. CLAUDE.md names this as an antipattern ('Don't have the orchestrator write code directly ... delegate to a specialist agent'). Consequence for the gate: `qa-gate.sh approve` refuses with error_key=completion_record_missing, and qa.md section 10 forbids QA satisfying that refusal with its own contract (QA's files_changed is [] and would defeat the completeness cross-check's independent witness). qa.md prescribes the audited `--no-completion '<reason>'` exit for the 'there was genuinely no specialist' case, which is what this review takes, with the reason naming that. Not HIGH: it is an audit-trail gap, not a defect in the shipped change, and the gate forces an explicit recorded decision rather than silently passing. Recorded so the missing contract is visible rather than inferred from an absence."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh review-request-build (claude-workflow-plugin-wuu8); not part of this change set",
+      "evidence": "`review-request-build` reported ok with diff_bytes=229, diff_total_bytes=0, diff_included_files=0, and `.diff` reads: '(the current change set's files produced no diff content against HEAD -- if change_set_hash is not the empty-content sentinel, check whether every changed file is a mode/permission-only change git diff does not render as content)'. change_set_hash is 78874c03..., not the empty-content sentinel, and the file is not a mode-only change.",
+      "description": "`.diff` is git diff HEAD-vs-working-tree, so for an ALREADY-COMMITTED change under review it is empty by construction \u2014 the commonest shape for a review that runs after the implementer commits, which is exactly this task's shape. The honest note names two candidate causes and omits that one, so a reviewer consuming only the request gets zero bytes of the change plus a misdirecting hint. This review compensated by reading `git show bcd5396` directly, but a Sol-lane review over the request alone would have reviewed nothing. Tooling finding against wuu8, not against 8lc1; worth a follow-up task to add the committed-change case to the note (and, ideally, to fall back to HEAD-vs-parent when the working tree is clean)."
+    },
+    {
+      "id": "R1-F6",
+      "severity": "info",
+      "location": ".claude/scripts/tests/run-tests.sh:1845 (outside the change set)",
+      "evidence": "dolt_hash_looks_valid's comment reads: 'this runner pins neither LC_COLLATE nor LC_ALL (bash 3.2, in use here, also predates `globasciiranges`)'. CI run 36232214628 'Verify dependencies' step records 'GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)'.",
+      "description": "bcd5396 correctly generalised the equivalent claim in the TEST ('bash 3.2's own case' -> 'bash's own case', :2766) but the SHIPPED library's comment still asserts bash 3.2 is 'in use here', which is false on CI. Harmless \u2014 it argues FOR the explicit class, which is right on every bash \u2014 but it is the same platform assumption this task disproved, one file over. run-tests.sh is not in this change set; INFO only, do not widen the change set to fix it."
+    },
+    {
+      "id": "R1-F7",
+      "severity": "info",
+      "location": "process / reviewer lane",
+      "evidence": "`.claude/scripts/codex-detect.sh status` returns {\"reviewer_lane\":\"codex\",\"method\":\"handshake\",...}. qa.md 6p.2 says that lane defers the review turn to the root orchestrator's relay and returns qa_status=needs-review.",
+      "description": "This review ran the `claude` lane and authored this artifact itself, because the spawn brief explicitly directs 'RECORD every round with qa-gate.sh review-record' and 'Approve or block via qa-gate.sh' \u2014 an explicit orchestrator instruction for this spawn. Flagged so the orchestrator can decide whether it also wants a sol-codex round over the same change_set_hash; nothing here is degraded, and the artifact schema is identical either way."
+    }
+  ]
+}

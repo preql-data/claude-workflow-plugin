@@ -1,0 +1,36 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-fkm.4",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "c3a0df6223e9e550d0661b43d56e0700cfe6ffc82d1cb1c6cea2c78eedf1aca6",
+  "risk_threshold": "high",
+  "stop_condition": "Every one of the six round-1 findings is verified fixed or explicitly deferred with a filed follow-up; the --no-design migration is proven complete over every success-expecting approve call site (shipped scripts, component specs, fixtures, MCP surface) by execution or by an accounted mechanism; and no critical/high finding remains open in the gate or design paths.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "high",
+      "location": ".claude/tests/component/specs/{verify-review-discipline.sh:195, arbitration-acceptance.sh:235+299, review-artifact-durability.sh:158, worktree-approval-resolution.sh:349, qa-gate.sh:1615-1742 (P7)} + lib/fixture.sh seed_design_verdict header",
+      "evidence": "Executed at 238d26b + working tree: `bash .claude/tests/component/run.sh --filter <spec>` -> verify-review-discipline FAILED 7 pass/17 fail (134s); arbitration-acceptance FAILED 26/7 (134s); review-artifact-durability FAILED 29/12 (209s); worktree-approval-resolution FAILED 31/34 (299s); qa-gate FAILED 238/21 (1311s, all 21 in the P7-* family). Failing haystacks carry error_key=no_design_attempted verbatim. Negative controls: subagent-start PASSED 60/0 (approve refs are comments only) and qa-gate-baseline PASSED (lib-seeded), same commands, same run.",
+      "description": "The design-satisfied migration covered only specs seeded through lib/fixture.sh seed_review_records (which now folds in seed_design_verdict) plus the two F1-shaped sites the fix round named. Five specs seed their records through SPEC-LOCAL helpers (p7_seed_review, run_cycle_approve, worktree's completion+approve helper, verify-review-discipline's inline seeding, arbitration's record_artifact path) and drive approve to expected SUCCESS with neither a design verdict nor --no-design, so DESIGN-SATISFIED-REFUSAL (unconditional by design) turns 91 assertions red across 5 specs. The fix round's own completion contract called 11B 'the migration's one other miss' and seed_design_verdict's header claims 'every spec driving approve to SUCCESS acquired this precondition too' — both claims are measured false. The phase's single uninterrupted component-tier acceptance pass fails as shipped. The refusal mechanism itself behaved correctly in every observed failure; this is unmigrated test seeding, not a gate defect."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "medium",
+      "location": ".claude/scripts/verify-before-stop.sh:3453-3457",
+      "evidence": "The F1-APPROVE-REFUSAL emit_block recovery text, step 3, prints: approve $CURRENT_TASK --no-review '...' --no-completion '...' 'manual re-run of the F1 approval' — two bypasses. The in-code F1 call at :3325-3328 now carries three (--no-design added by this fix round, ~130 lines above in the same function).",
+      "description": "The printed recovery recipe promises 'run the same approval by hand' but is no longer the same approval: on the ordinary doc-only task (no design phase) the hand-rerun refuses no_design_attempted where the automated call succeeds, so the recipe is structurally incapable of reproducing the F1 approval it names. Same class as the J21 option-1 recipe R1-F4 fixed at :2149-2159 in this same file — the sweep fixed the named recipe and missed the sibling. Below gz3 severity because the refusal envelope loudly names the --no-design remedy (one extra round-trip, no deadlock, no state damage) — hence medium, not high."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "low",
+      "location": ".claude/skills/workflow-engine/SKILL.md:146 and :269",
+      "evidence": "Both recipes read `qa-gate.sh approve <task-id> '<summary>'` (bare form); the step-6 walkthrough at :269 presents it as the complete QA flow. Not in this change set (file untouched since before D2).",
+      "description": "Residual instance of the R1-F4 recipe class outside the change set: the bare approve now refuses first-try on any task without a design verdict (no_design_attempted). Self-explaining envelope; follow-up territory alongside uuk3's choose-approve gap, not a blocker at threshold=high."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

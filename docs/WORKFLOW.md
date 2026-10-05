@@ -107,7 +107,7 @@ Track QA review state.
 | `qa-gate-entered` | QA has claimed the task; gate is armed | `qa-gate.sh enter` |
 | `qa-approved` | QA has signed off | @qa agent (via `qa-gate.sh approve` / `choose approve`) |
 | `qa-blocked` | QA found issues; specialist must fix | @qa agent (via `qa-gate.sh block`) |
-| `qa-escalated` | Iteration cap reached (spec 0.2); awaiting a J21 decision | `verify-before-stop.sh` (auto, on first cap hit) |
+| `qa-escalated` | Iteration cap reached (spec 0.2) — measured on `max(verification iterations, review rounds against the current change set)`, and never while a review is in flight with nothing failing (`claude-workflow-plugin-2ty`); awaiting a J21 decision | `verify-before-stop.sh` (auto, on first cap hit) |
 | `qa-deferred` | J21 option 4 recorded (spec 0.2); Stop hook now allows | `qa-gate.sh choose defer` OR `verify-before-stop.sh` auto-defer |
 | `rubric-pending` | Rubric-grader cycle armed (spec Phase A); awaiting a grader verdict | `qa-gate.sh enter` (auto, alongside qa-gate-entered) |
 | `rubric-satisfied` | Rubric-grader returned `satisfied`; the verdict-backed audit trail for QA approval. Survives `approve`; survives a re-`enter` while the recorded `change_set_hash` still matches the current change set, and is cleared as stale otherwise (see `docs/HOOKS.md`) | `qa-gate.sh grade-record` (when the verdict JSON is `satisfied`) |
@@ -156,23 +156,72 @@ After QA approval:   [backend, qa-approved]
 
 ### QA Label Flow
 
+Earlier revisions of this diagram showed only `qa-pending` and
+`qa-approved` — a two-node happy path that left out `qa-gate-entered`,
+`qa-blocked`, `qa-escalated` and `qa-deferred` entirely: the whole
+escalation/defer path that v5 D-phase work made load-bearing. Rebuilt below
+from the state table in **[`docs/HOOKS.md`](../docs/HOOKS.md)** — Hook
+Configuration → "States — each row lists the trigger, label set, and
+Stop-hook behaviour" — which **is normative**; this diagram (and the table
+under it) is a navigational summary, not a second source of truth. Where
+the two disagree, HOOKS.md governs.
+
 ```
-Implementation done:     qa-pending added
-                              │
-                              ▼
-QA starts review:       qa-pending (still)
-                              │
-        ┌─────────────────────┼─────────────────────┐
-        ▼                                           ▼
-    Issues found                              Approved
-        │                                           │
-        ▼                                           ▼
-    qa-pending (still)                   qa-pending → qa-approved
+    qa-pending added (specialist finishes, adds the label)
         │
-        │ (fix issues)
+        ▼
+    qa-gate.sh enter            →  +qa-gate-entered, gate armed
         │
-        └───────────────────────────────────────────┘
+        ▼
+    ┌─────────┐   block          ┌─────────────┐
+    │ pending │ ───────────────▶ │ qa-blocked  │  (fix, re-submit)
+    └────┬────┘                  └──────┬──────┘
+         │                              │
+         │ cap reached                  │ fresh `enter`
+         │ (max(iterations,             │ (or `approve`)
+         │  rounds) hits                │
+         │  MAX_ITERATIONS,             │
+         │  no review in flight)        │
+         ▼                              │
+    ┌───────────┐                       │
+    │ escalated │                       │
+    └─────┬─────┘                       │
+          │ choose defer, OR            │
+          │ 2 unanswered escalated      │
+          │ Stops (auto-defer)          │
+          ▼                             │
+    ┌──────────┐                        │
+    │ deferred │                        │
+    └─────┬────┘                        │
+          │                             │
+          └── qa-gate.sh approve ───────┘   (reachable from pending,
+                     │                        qa-blocked, escalated,
+                     ▼                        OR deferred — the ONE
+              ┌─────────────┐                 universal exit)
+              │ qa-approved │   Stop hook releases
+              └─────────────┘
+
+    (from `escalated`, `choose continue` / `choose tech-debt` also
+     returns directly to `pending` — not drawn above to keep the
+     happy-path arrows readable; see the table below)
 ```
+
+| State | Labels actually on the task | Stop-hook behaviour | How you leave it |
+| --- | --- | --- | --- |
+| `pending` | `qa-pending` + `qa-gate-entered` | Run the full suite each loop; block until approved | `block` → `qa-blocked`; cap reached → `escalated`; `approve` → `qa-approved` |
+| `qa-blocked` | `qa-blocked` **+ `qa-pending` + `qa-gate-entered`, preserved** — `cmd_block` clears only `qa-approved` | Same as `pending`; the specialist fixes and re-submits | Specialist fixes, re-adds `qa-pending` if needed; QA re-`enter`s; or `approve` |
+| `escalated` | `qa-pending` + `qa-escalated` | Skip the full suite, reuse the cached failure, block on a J21 choice (posted once) | `choose continue` / `choose tech-debt` → back to `pending`; `choose defer` (or 2 unanswered escalated Stops, auto-defer) → `deferred`; or `approve` |
+| `deferred` | `qa-pending` + `qa-deferred` | Allow the Stop immediately — the single audited escape valve (principle 6) | A fresh `enter` clears `qa-escalated`/`qa-deferred` and resumes `pending`; or `approve` |
+| `qa-approved` | `qa-approved` only — every other QA-cycle label is dropped in the same atomic transition, including a prior `qa-blocked` | Stop hook releases | Terminal — `bd close` |
+
+`qa-gate.sh approve` (or `choose approve`) is reachable from every
+non-terminal state above, not just `pending` — that is the one universal
+exit the diagram draws explicitly. `rubric-pending`/`rubric-satisfied` run
+alongside this machine rather than inside it (see the
+[QA Status Labels](#qa-status-labels) table above): `rubric-pending` is
+swept by the same `approve` transition; `rubric-satisfied` is not a
+cycle label at all — it is the verdict-backed audit trail behind the
+approval, and it survives the approval that used it.
 
 ---
 
@@ -197,23 +246,29 @@ EPIC=$(bd create "Epic: User Authentication" -t epic -p 1 \
 ### 3. Create Subtasks
 
 ```bash
+# --no-inherit-labels on every --parent create: bd copies the parent's labels
+# onto the child, so a subtask under a parent carrying qa-approved is born
+# claiming a review that never happened (claude-workflow-plugin-rmz). The
+# bd_create_task / bd_create_epic MCP tools do this for you; the bare CLI does
+# not.
+
 # Backend task
 BACKEND=$(bd create "Backend: Auth API endpoints" -p 1 \
-    --parent $EPIC \
+    --parent $EPIC --no-inherit-labels \
     --description "POST /auth/login, /auth/register, /auth/refresh" \
     -l backend,qa-pending --json | jq -r '.id')
 # Result: bd-abc123.1
 
 # Frontend task
 FRONTEND=$(bd create "Frontend: Login/Register UI" -p 1 \
-    --parent $EPIC \
+    --parent $EPIC --no-inherit-labels \
     --description "Login form, register form, password reset" \
     -l frontend,qa-pending --json | jq -r '.id')
 # Result: bd-abc123.2
 
 # QA task
 QA=$(bd create "QA: Test auth user journeys" -p 1 \
-    --parent $EPIC \
+    --parent $EPIC --no-inherit-labels \
     -l qa --json | jq -r '.id')
 # Result: bd-abc123.3
 ```
@@ -407,8 +462,8 @@ The Stop hook enforces QA approval:
 
 ### What Allows Completion
 
-Exactly two paths (`verify-before-stop.sh:982-992` and the F1 fast path at
-`:616-691`):
+Exactly two paths (the `GATE_STATUS=` read in `verify-before-stop.sh`, and the
+F1 fast path — the block guarded by `FASTPATH_CLASS`):
 
 - The task has the **`qa-approved` label** (the single source of truth, set
   by `qa-gate.sh approve`), OR
@@ -418,7 +473,7 @@ Exactly two paths (`verify-before-stop.sh:982-992` and the F1 fast path at
   which auto-approves with an audited comment).
 
 There is **no** "comment containing QA APPROVED" path. The comment-text
-fallback was deleted (`verify-before-stop.sh:20-22`); a comment whose body
+fallback was deleted (the `B13` line in `verify-before-stop.sh`'s header); a comment whose body
 says "QA APPROVED" does not release the gate. Likewise there is no marker
 file: `.qa-tracking/approved` is never read.
 
@@ -426,10 +481,12 @@ file: `.qa-tracking/approved` is never read.
 
 A `Ctrl+C` interrupt does end the turn: when the Stop hook fires with
 `stop_reason=user_interrupt` it emits `{}` and exits 0 immediately, before
-running any check or writing any artifact (`verify-before-stop.sh:543-545`).
+running any check or writing any artifact (the
+`[[ "$STOP_REASON" == "user_interrupt" ]]` arm in `verify-before-stop.sh`).
 This pass-through is deliberate — it is the same anti-loop guard that lets
-the hook bail out on `stop_hook_active` (`:538-540`, AgentLint H3) so the
-gate can never trap the user in a forced continuation. It is **not** tracked
+the hook bail out on `stop_hook_active` (the circuit breaker immediately
+above that arm, AgentLint H3) so the gate can never trap the user in a
+forced continuation. It is **not** tracked
 or recorded anywhere: the interrupt leaves no Beads label, no comment, and
 no `sync-errors.log` entry. The task simply stays at whatever gate state it
 held, so the next non-interrupted Stop re-evaluates it normally.
@@ -464,8 +521,8 @@ KEY DECISIONS: 30s timeout, 3 retries with exponential backoff"
 ```bash
 # Good - organized
 EPIC=$(bd create "Epic: Payment Integration" -t epic -p 1 --json | jq -r '.id')
-bd create "Backend: Stripe API" --parent $EPIC -l backend,qa-pending
-bd create "Frontend: Checkout UI" --parent $EPIC -l frontend,qa-pending
+bd create "Backend: Stripe API" --parent $EPIC -l backend,qa-pending --no-inherit-labels
+bd create "Frontend: Checkout UI" --parent $EPIC -l frontend,qa-pending --no-inherit-labels
 
 # Bad - flat
 bd create "Stripe API" -l backend,qa-pending

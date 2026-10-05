@@ -1,0 +1,14 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-k6re",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "59abecf171aeb8be74297b145c27e6a65316412108a54663e19fdc61b9114edb",
+  "risk_threshold": "high",
+  "stop_condition": "Done when the two round-6 fixes have been checked ONCE: (1) whether removing the shell tail -1 from matching_approval_record_text leaves any input where the value handed to the bypass check is not the record its author wrote, and (2) whether any path lets cmd_approve report success without traversing emit_approve_success, or lets that gate report success when a precondition failed. Then either a finding at or above high, or verdict=approve with findings=[]. BOUNDED: no exhaustive proof of absence. Diff is -U0 for size; ask for context if a hunk is unreadable rather than guessing.",
+  "verdict": "approve",
+  "findings": [],
+  "iterations": 8,
+  "stopped_by": "stop_condition"
+}

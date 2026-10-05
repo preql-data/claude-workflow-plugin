@@ -99,15 +99,10 @@ cp "$PLUGIN_DIR/.claude/scripts/bd-github-link.sh" "$FIXTURE/.claude/scripts/"
 cp "$PLUGIN_DIR/.claude/scripts/current-task.sh"   "$FIXTURE/.claude/scripts/"
 chmod +x "$FIXTURE/.claude/scripts/"*.sh
 
-# Hard preconditions.
+# Hard preconditions. No BD_SHIM_ONLY skip arm any more (a9hh): CI installs
+# the real bd, and a bd-less environment is a hard failure everywhere — the
+# whole fixture is bd-driven, so there's no useful partial coverage.
 if ! command -v bd >/dev/null 2>&1; then
-    # Match the L2 spec convention: in BD_SHIM_ONLY=1 mode (CI runner,
-    # no public bd installer), skip-with-log instead of hard-fail. The
-    # whole fixture is bd-driven — there's no useful partial coverage.
-    if [ "${BD_SHIM_ONLY:-0}" = "1" ]; then
-        echo "SKIPPED: bd-github-link.test.sh (bd not available; CI env BD_SHIM_ONLY=1)"
-        exit 0
-    fi
     echo "bd CLI not on PATH -- this fixture requires Beads."
     exit 1
 fi
@@ -134,9 +129,10 @@ REAL_BD="$(command -v bd 2>/dev/null || true)"
 
 cat > "$FIXTURE/bin/bd" <<EOF
 #!/bin/bash
-# bd shim: forward to real bd with --no-daemon to avoid concurrent
-# daemon-autostart races during the test run.
-exec "$REAL_BD" --no-daemon "\$@"
+# bd shim: forward to the real bd. It used to inject --no-daemon to dodge
+# bd 0.47.x daemon-autostart races on the tempdir DB; bd 1.1.2 removed the
+# flag and the daemon (embedded in-process Dolt), so this is a pass-through.
+exec "$REAL_BD" "\$@"
 EOF
 chmod +x "$FIXTURE/bin/bd"
 

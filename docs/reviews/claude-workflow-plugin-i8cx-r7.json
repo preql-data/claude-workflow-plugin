@@ -1,0 +1,22 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-i8cx",
+  "reviewer_identity": "sol-codex",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_pin": "gpt-5.6-sol",
+  "reviewed_hash": "30440a68a175edd406e757c910d534b832a715ee448e3fd03dd15c43da338ba8",
+  "risk_threshold": "high",
+  "stop_condition": "Stop when R4-F1 is adjudicated closed or still-open with a concrete failure path, the single-parse property is confirmed or refuted, and the 13-read residual is judged. Scope is review-check.sh only.",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R7-F1",
+      "severity": "high",
+      "location": ".claude/scripts/review-check.sh:813",
+      "evidence": "R4-F1's separate post-validation reread is closed: lines 1185-1241 project task_id, unit_ids, and unit_content only from vout; line 1002 derives unit_content from the same in-memory block, and its recursive key sorting plus tojson is byte-equivalent to the legacy jq -cS representation. The disclosed residual at lines 755, 767-798, and 813 is nevertheless fail-open. Let valid artifact A pass the eight heading greps and sentinel count/line reads; after line 798, atomically replace it with B, which omits the required headings and sentinels but places a fully schema-valid JSON object carrying A's task_id and U1 between A's recorded line numbers. awk at line 813 captures B, every later check validates that in-memory object, and validate-design emits ok:true. Restoring A immediately after awk also leaves authentic on-disk A and its hash alongside B-derived unit_content, without triggering any guard.",
+      "description": "The design-unit-json second extraction is gone, but validate-design still does not validate one file snapshot. Its 13-read residual can combine structural checks from A with unit content from B and return success, so the residual is not fail-closed. Consumers can consequently bind or clear using unit bytes that did not come from the artifact whose structure and external hash they trust."
+    }
+  ],
+  "iterations": 7,
+  "stopped_by": "stop_condition"
+}

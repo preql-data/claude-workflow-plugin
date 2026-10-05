@@ -1,0 +1,43 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-4l1d",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-opus-5[1m]",
+  "reviewer_pin": "claude-opus-5",
+  "reviewed_hash": "8086b1f4c38b363406efa15bbd943aa7093c54f32938015ff7e09d9471b8713f",
+  "risk_threshold": "high",
+  "stop_condition": "both round-1 HIGH findings are independently re-measured as cleared, ad8f4cb introduces no new failure anywhere in the L1 tier or the drift guard, the 0z9v negative control still fails at the new HEAD, and the 9-of-30 change-set binding is either shown to conceal nothing or blocked on",
+  "verdict": "approve",
+  "findings": [
+    {
+      "id": "R2-F1",
+      "severity": "low",
+      "location": "bd claude-workflow-plugin-4l1d, COMPLETION v1 role=devops (payload_sha=4d61f7fe4a18189ab10ffd2be743b85fdabb1e3b6141f14bd55d7fc735747227), llm_observations",
+      "evidence": "The record states: \"the 21 fixture files will be folded in automatically the next time the gate is (re-)entered\". Measured wrong two independent ways. (a) `git status --porcelain -- .claude/tests/e2e/fixtures/` returns EMPTY — the 21 are committed in ad8f4cb, so reconcile_tracker's git-visible delta cannot contain them. (b) More fundamentally they are DENYLISTED: `WORKFLOW_DENYLIST_REGEX` in .claude/scripts/workflow-denylist.sh carries `(^|/)\\.claude/tests/e2e/fixtures/[^/]+/(\\.claude/(scripts|beads)|\\.beads)/`, and `workflow-denylist.sh is-denylisted .claude/tests/e2e/fixtures/go-cli-refactor/.claude/scripts/qa-gate.sh` exits 0. So they would never enter the tracker even uncommitted. The correction is recorded on claude-workflow-plugin-ha16 (comment 2026-09-27T18:23:22Z) and on that task's earlier 2026-08-08 QA note, but NOT on 4l1d.",
+      "description": "A durable, confidently-stated false claim inside an audit record on this task; a reader of 4l1d alone takes it at face value. Not blocking, and largely self-healing: this approval's own summary states the correct mechanism on 4l1d, which is the record a later auditor reads first. Remedy if wanted: one comment on 4l1d pointing at ha16. Noting separately that the round-2 handover to me described the mechanism as the `cp`/hook gap alone; the denylist is the binding cause and I established that myself from the regex rather than inheriting either account."
+    },
+    {
+      "id": "R2-F2",
+      "severity": "info",
+      "location": "the 9-path change-set binding vs the 29 files changed across 157e6f4..ad8f4cb (30 with the untracked round-1 review artifact)",
+      "evidence": "ADJUDICATED, not inherited. (i) Each of the 21 mirror diffs introduced by ad8f4cb is LINE-FOR-LINE IDENTICAL to the corresponding canonical script's own 157e6f4..ad1f655 diff — checked for all 21 (7 fixtures x qa-gate.sh, beads-ledger.sh, workflow-manifest.sh) by comparing the +/- line sets, 21/21 OK. (ii) At HEAD every mirrored script in every fixture is byte-identical to canonical: 196 compared, 0 drifted. (iii) That identity is continuously enforced, not observed once — _fixture-script-sync.unit.spec.ts asserts it per (fixture, script) pair, re-run by me at 210 passed (210), in CI job l3-vitest-unit. (iv) The exclusion is structural: the denylist regex above matches the mirror subtree, so no reconcile can ever widen the binding without a denylist change. (v) `make sync-fixtures` (Makefile:595) is a plain cp/chmod loop and post-edit.sh's matcher is `^(Write|Edit|MultiEdit|NotebookEdit)$` — both read directly. (vi) Completeness of the sync surface: a tree-wide search for every copy of the three changed scripts finds only the 21 mirrors (all identical), two L2 component SPECS of the same names (not mirrors — `qa-gate.sh component spec`), and the stale worktree debris in R2-F3.",
+      "description": "MY CONCLUSION, which I sign: binding 9 of 30 conceals nothing HERE, because the 21 unbound paths are mechanically derived copies of three files that ARE bound and were reviewed in round 1, the derivation is proved line-for-line, and it is guarded on every CI run. WHAT I DO NOT SIGN: that this generalises. The same gap would conceal 21 unreviewed hand edits identically, and the drift guard would not catch an edit made to canonical and mirrors together. This is claude-workflow-plugin-ha16, open since 2026-08-06 with a 'decide before D7' note; its option (c) — record a 'fixtures synced from <canonical-hash>' attestation at approve time, binding the derivation rather than the bytes — is the smallest honest fix, and putting the derivation into this approval summary is a per-instance stand-in for it, not a substitute."
+    },
+    {
+      "id": "R2-F3",
+      "severity": "info",
+      "location": ".claude/tests/e2e/fixtures/node-react-auth/.claude/worktrees/agent-aa4ca2a982e3022e9/.claude/scripts/qa-gate.sh and .../agent-a2227ef12bceb35bd/.claude/scripts/qa-gate.sh",
+      "evidence": "Both hash aec27f69c875077f..., matching NEITHER canonical at 157e6f4 (92324097cae0352d...) NOR canonical at HEAD (49831700e5596150...) — so they were already stale before this change set. Untracked in git (`git ls-files` on that subtree is empty), denylisted (`(^|/)\\.claude/worktrees/` in WORKFLOW_DENYLIST_REGEX), and outside the drift guard's glob, which covers `fixtures/<name>/.claude/scripts/` only.",
+      "description": "Leftover agent-worktree debris from an old live e2e run, not a mirror surface `make sync-fixtures` missed. Recorded only so that a future reader who runs the same tree-wide comparison does not mistake it for an incomplete sync, and so the fix for R2-F2/ha16 is not scoped to cover it by accident."
+    },
+    {
+      "id": "R2-F4",
+      "severity": "info",
+      "location": "carried forward from round 1",
+      "evidence": "R1-F6 (sha256-escape-decode section 5's family tripwire is file-scoped while its comment claims function scope, and path_passing_files' needle requires a quoted $-expansion argument) is unaddressed, correctly — it was LOW and out of scope for this round. R1-F3 IS addressed: ad8f4cb's commit message carries the 342/78-are-root-readings correction forward, including the framing that there is no Linux-vs-macOS difference here, only root-vs-non-root; I re-measured 345/345 and 84/84 at uid 1000 in the runner. R1-F5 is fixed and its conclusion left intact. R1-F4 and R1-F7 are filed as claude-workflow-plugin-16e6 and claude-workflow-plugin-lto2. R1-F8 needs no action by design.",
+      "description": "Bookkeeping, so the round-1 finding set is fully accounted for in the record rather than silently dropped on approval."
+    }
+  ],
+  "iterations": 2,
+  "stopped_by": "verdict"
+}

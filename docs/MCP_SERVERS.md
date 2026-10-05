@@ -91,7 +91,7 @@ The two servers slot into the orchestrator -> specialist -> QA flow at three key
 
 1. **Orchestrator decomposition (pre-delegation).** When the orchestrator plans an epic or any non-trivial change, before spawning a specialist it calls `code_search` / `code_context` for the symbols the change is likely to touch *and* `impact_of({symbol})` (or `impact_of({file})`) to surface transitive callers and dependent files. The result lands in the SPEC doc via `bd_doc_write({task_id, name: "spec", ...})` so the specialist starts from full context — no re-discovery, and no surprise from a high-fan-in caller the orchestrator forgot to mention. The `impact_of` query is conditional on the server being available so a target project that has not yet installed code-graph degrades gracefully to the search-only flow.
 
-2. **Specialist claim + completion.** A specialist calls `bd_doc_read({task_id, name: "spec"})` to fetch the SPEC, `bd_update_task({task_id, status: "in_progress"})` to claim, and on completion `bd_qa_enter` then `bd_add_label("qa-pending")`. During the work, specialists query `code_context({symbol})` and `symbol_callers({symbol})` to identify the exact call sites a change touches. The completion contract from F7 — `{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations, context_coverage}` — flows back through `bd_update_task --notes` (or via a new versioned doc).
+2. **Specialist claim + completion.** A specialist calls `bd_doc_read({task_id, name: "spec"})` to fetch the SPEC, `bd_update_task({task_id, status: "in_progress"})` to claim, and on completion `bd_qa_enter` then `bd_add_label("qa-pending")`. During the work, specialists query `code_context({symbol})` and `symbol_callers({symbol})` to identify the exact call sites a change touches. The completion contract from F7 — `{task_id, files_changed[], tests_added[], decisions[], blockers[], llm_observations, context_coverage}` — flows back through `bd_update_task --notes` (or via a new versioned doc). Since v5 D5 (claude-workflow-plugin-fkm.7) five more fields append after those seven — `unit_id, design_hash, green_before, green_after` (piece 3), then `criteria_tests` (piece 4) — required on every payload and enforced the same way (`review-check.sh validate-completion`); empty (`unit_id`/`design_hash`) or `"none"` (`green_before`/`green_after`) or `{}` (`criteria_tests`) is the correct declaration when the task is not bound to a design unit. For a bound task, `qa-gate.sh design-unit-align` (run at `approve`) is the mechanical check that `criteria_tests` actually maps every declared criterion to a test that exists.
 
 3. **QA regression assessment (extends J19).** The QA agent pulls the diff via `git diff -- $(cat .claude/.qa-tracking/changed-files.txt)` and, for every changed symbol, calls `impact_of({symbol})`. High-fan-in hits are mandatory regression candidates — QA inspects (or runs) their tests as part of the gate, not just the tests that ship in the diff. The full test suite still runs (J19's anti-scope-creep rule), but the impact graph is what tells QA *which* of the existing tests are the highest-value ones to read before approving. Pairs with `verify-before-stop.sh`'s J19 framing (the gate runs the FULL test suite each iteration, not just tests for files in the diff). On approval, `bd_qa_approve` is one atomic call (label add + label removes + comment + memory write) — no manual sequencing. The grader (Phase A) never calls an MCP tool itself, but it does read code-graph output at one remove: packet item 7 is the mechanical impact report that `impact-report.sh` produced by driving this server. See [`AGENTS.md`](AGENTS.md) for the full eight-item packet.
 
@@ -113,7 +113,8 @@ The plugin ships two parallel MCP manifests. Each scope uses a different variabl
 {
   "mcpServers": {
     "bd":         { "type": "stdio", "command": "node",
-                    "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/bd-mcp/bin/bd-mcp.js"] },
+                    "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/bd-mcp/bin/bd-mcp.js"],
+                    "env": { "BD_CWD": "${CLAUDE_PROJECT_DIR:-.}" } },
     "code-graph": { "type": "stdio", "command": "node",
                     "args": ["${CLAUDE_PROJECT_DIR:-.}/.claude/mcp/code-graph-mcp/bin/code-graph-mcp.js"] }
   }
@@ -121,6 +122,8 @@ The plugin ships two parallel MCP manifests. Each scope uses a different variabl
 ```
 
 The `:-.` default is required. Per the Claude Code MCP docs ([code.claude.com/docs/en/mcp](https://code.claude.com/docs/en/mcp)), `CLAUDE_PROJECT_DIR` is set in the *spawned MCP server's* environment, not in Claude Code's own environment — so a bare `${CLAUDE_PROJECT_DIR}` in a project-scoped `.mcp.json` is unresolved at substitution time and produces an MCP-diagnostics warning ("Missing environment variables: CLAUDE_PROJECT_DIR"). The `:-.` default falls back to the current working directory (which is the project root when Claude Code starts), which resolves the warning without changing semantics.
+
+The `bd` server's `env.BD_CWD` (claude-workflow-plugin-j7kk, 39cy) is the same substitution applied to a second slot: `exec-bd.js`'s `resolveBdCwd()` precedence is `opts.cwd` > `BD_CWD` > `CLAUDE_PROJECT_DIR` > `process.cwd()`, and the bd-mcp README's own env table calls `CLAUDE_PROJECT_DIR` only "usually" set by Claude Code for a spawned server. Setting `BD_CWD` explicitly removes the dependency on `CLAUDE_PROJECT_DIR` also being visible inside the spawned process's own environment — an MCP server that launched outside the project root would otherwise walk up to 8 parent directories from an unrelated `process.cwd()` looking for `.beads/`, and could resolve the wrong store, or none, with no error.
 
 `.claude-plugin/plugin.json` (the plugin manifest, applies when the plugin is loaded as a plugin) uses bare `${CLAUDE_PLUGIN_ROOT}`:
 
@@ -138,6 +141,36 @@ The `:-.` default is required. Per the Claude Code MCP docs ([code.claude.com/do
 Plugin-scope manifests substitute `${CLAUDE_PLUGIN_ROOT}` (and `${CLAUDE_PROJECT_DIR}`) directly per the docs, so the default form is not required here.
 
 The two manifests should always agree on server set and tool surface; if you change one, change the other in the same commit. The L2 spec `.claude/tests/component/specs/installer-mcp-config.sh` enforces this for the rendered install (no bare `${VAR}` references, both servers wired, the retired `code-context` entry absent).
+
+## Restart Claude Code after changing MCP server code
+
+**The running server is the one that was spawned at session start.** Claude Code
+launches each MCP server as a child process when the session begins and keeps
+that process for the session's lifetime. Editing anything under
+`.claude/mcp/*/src/` therefore has NO effect on the tools you are calling right
+now — the old code stays resident until the session restarts.
+
+This is worth stating explicitly because the failure is silent and asymmetric.
+It bit this project during the bd 1.1.2 migration: `bd_show_task` and
+`bd_list_comments` had just been fixed to pass `--include-comments`, but the
+session's resident server predated the fix, so every comment READ returned zero
+for the whole session while every WRITE succeeded. Nothing errored. The natural
+reading of "writes work, reads are empty" is a data-loss bug in the database,
+which is a long way from the truth.
+
+Symptoms that should make you suspect a stale server rather than your change:
+
+- a tool returns empty or default data for records you can see with the `bd` CLI;
+- a fix you just made to `src/` has no effect, and re-running it changes nothing;
+- `workflow-doctor.sh`'s `mcp_bd` / `mcp_code_graph` checks pass (they spawn a
+  FRESH server over stdio, so they exercise the NEW code and disagree with the
+  session).
+
+That last point is the reliable discriminator: if the doctor sees correct
+behaviour and your session does not, the session is running stale code.
+
+**Fix:** restart Claude Code. There is no reload command, and `/mcp` reconnects
+the transport rather than re-reading the source.
 
 ## Troubleshooting: bd (or code-graph) shows failed / not spawned
 

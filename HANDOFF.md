@@ -99,7 +99,9 @@ work on this repository.
   not a data row). **Release rule MET**: NOT-PROVEN = 0 AND the Stage-3
   red-team P0/P1 (llh.18) closed. The release-defining change is the
   **change-set-hash-bound QA approval (llh.18)** — the Stop gate now
-  requires a tamper-evident approval record whose `change_set_hash`
+  requires a change-set-bound approval record — a disclosure that
+  approve ran and bound this hash, not a cryptographic guard against
+  hand-forgery (`claude-workflow-plugin-pqnd`) — whose `change_set_hash`
   matches the current diff, not the bare `qa-approved` label, defeating
   the red team's forged-label (P0), decoy-current-task (P1), and
   post-approval-drift attacks (642 L2 assertions incl. a load-bearing
@@ -275,6 +277,294 @@ release notes — each has a concrete flip-to-PROVEN path in its
   deriver to map the worktree task-creation command shape, then the
   label-milestone invariant passes on the seed cassette.
 
+## Verify conditions for "v5.0.0 (design as a first-class, reviewed, continuously-enforced phase) shipped"
+
+Every number below was measured on **2026-09-18** by the D7 docs/audit piece
+of `claude-workflow-plugin-fkm.9`, on branch `v5/design-phase` at HEAD
+`261e09e` plus this piece's own uncommitted edits to `RELEASE_AUDIT.md`,
+`HANDOFF.md` and `CHANGELOG.md`. This piece owns those three files
+exclusively and does not own the version/manifest piece, the docs-rewrite
+piece, or the live-validations piece of the same D7 task — several
+conditions below are stated as **NOT YET MET** rather than rounded up to a
+pass, because they are those other pieces' work and this section's whole
+purpose is to be checkable, not reassuring. A new session can confirm
+readiness by re-running every command here.
+
+**Addendum, 2026-09-19:** the live-validations piece (LIVE-1) and a
+version/manifest update landed a day later than the rest of this block.
+Three consequences, each also reflected at its own bullet below rather than
+only here: the v5.0.0 ledger's tally moved from `11 / 5 / 1 / 0 / 17` to
+`11 / 6 / 1 / 0 / 18` (`DP18` added for LIVE-1, `DP15`'s caveat narrowed);
+`manifests/v5.0.0.sha256` now exists; and a fresh v4.1.0 -> v5.0.0 upgrade
+target measures `12/12`, exit `0` on `install.sh --verify` — which sits
+alongside, and does not change, this checkout's own `11/12`, exit `1`.
+
+- assert: `.claude-plugin/plugin.json` `version` equals `5.0.0`. Run
+  `node -e 'console.log(JSON.parse(require("fs").readFileSync(".claude-plugin/plugin.json","utf8")).version)'`
+  and confirm `5.0.0`. **MET** (checked live).
+- assert: the manifest's top-level 2-space indentation is intact — the same
+  load-bearing anchor named in every prior release's verify block. Run
+  `grep -c '^  "version": "5\.0\.0",$' .claude-plugin/plugin.json` and
+  confirm `1`. **MET** (checked live).
+- assert: the banner is produced by EXECUTING the installer. Run
+  `bash install.sh --help | head -3` and confirm the first line is
+  `Claude Workflow Plugin v5.0.0 installer`. **MET** (checked live).
+- assert: the agent census is bumped, and three independent counting
+  methods agree. Run `jq '.agents | length' .claude-plugin/plugin.json` →
+  `9`; run `ls .claude/agents/*.md | wc -l` → `9`; run `bash install.sh
+  --verify 2>&1 | grep '^PASS agents'` → contains `9 declared agent(s)`.
+  The two new names in all three counts are `designer` and
+  `design-reviewer`. **MET** (all three checked live, 2026-09-18).
+- assert: five role classes resolve, one row per agent-group. Run
+  `bash .claude/scripts/workflow-model-apply.sh --print-role-map | wc -l` →
+  `9`, and `bash .claude/scripts/workflow-model-apply.sh --print-role-map |
+  awk '{print $1}' | sort -u | wc -l` → `5` (`designer`, `design_reviewer`,
+  `orchestrator`, `implementer`, `reviewer`). **MET** (checked live).
+- assert: the design rubric carries all eight DS criteria. Run
+  `grep -cE '^### DS[0-9]+\.' .claude/rubrics/design.md` and confirm `8`.
+  **MET** (checked live).
+- assert: `docs/RELEASE_AUDIT.md` now holds FOUR ledgers (frozen v3.5.0,
+  v4.0.0, v4.1.0, v5.0.0), so its greps are section-scoped per ledger. Run:
+  - v5.0.0 ledger →
+    `awk '/^## v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    and the three sibling statuses → confirm `11 / 6 / 0 / 1`, and
+    `grep -cE '^\| DP[0-9]+ \|'` over the same range → `18`. No row is
+    NOT-PROVEN; the one REMOVED row is `DP17` (Linear) — see below. (`11/5/
+    1/0/17` at this block's original 2026-09-18 measurement; `11/6/1/0/18`
+    after `DP18` — LIVE-1 — was appended 2026-09-19 and `DP15`'s caveat was
+    narrowed; and `11/6/0/1/18` from 2026-09-28 after F5
+    (`claude-workflow-plugin-qttq`) moved `DP17` from NOT-PROVEN to REMOVED
+    — see below. PROVEN is unaffected throughout; only PROVEN-WITH-CAVEAT,
+    NOT-PROVEN and REMOVED have moved, each named at the point it moved.)
+  - assert the trap is closed for a fourth time: the v4.1.0 range must NOT
+    end at `,0`. Run `grep -cF 'v4\.1\.0 claims ledger/,0'
+    docs/RELEASE_AUDIT.md` and confirm `0`; run `grep -cF 'v4\.1\.0 claims
+    ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md` and confirm
+    `5`. **Positive control:** `grep -cF 'v5\.0\.0 claims ledger/,0'
+    docs/RELEASE_AUDIT.md` → `5` — v5.0.0's own five ranges, which
+    legitimately end at `,0` because v5.0.0 is currently the last
+    claims-ledger section. **MET**, and the two prior ledgers' own greps
+    (v3.5.0 → v4.0.0, v4.0.0 → v4.1.0) are unaffected and still return their
+    original counts (checked live: `51/47/0/23` and `14/0/0/0`
+    respectively).
+- assert: the Sol-first design-reviewer lane never touches the three gate
+  scripts. Run `grep -icE 'codex|reviewer[._]lane'
+  .claude/scripts/qa-gate.sh .claude/scripts/verify-before-stop.sh
+  .claude/scripts/review-check.sh` and confirm `0` for all three. **MET**
+  (checked live, 2026-09-18 — this is a direct re-derivation, not a read of
+  `.claude/scripts/tests/reviewer-lane-structural.test.sh`, which asserts
+  the same thing on every `make test`).
+- assert: the session-model guard warns and never blocks. Run
+  `grep -c 'Never blocking' .claude/scripts/session-start.sh` and confirm
+  `>= 1`; the same warning names its own fix inline (`/model
+  $SS_DRIFT_EXPECTED`). **MET** (checked live).
+- assert: install verification reports the MCP tool counts exactly. Run
+  `bash install.sh --verify` and confirm the `mcp_bd` line reads "tools/list
+  returned exactly 21 tool(s)" and `mcp_code_graph` reads "exactly 7
+  tool(s)". **MET** (checked live, 2026-09-18).
+- assert, and this is the one prior verify blocks did not have to state
+  this carefully: `install.sh --verify`'s overall exit code and check
+  count. **DO NOT assume 11/11 from the plan's own gate line — it predates
+  a check this release's own Phase P added.** Run
+  `sed -n 's/^DOCTOR_CHECK_NAMES="\(.*\)"$/\1/p' .claude/scripts/workflow-doctor.sh | wc -w`
+  and confirm **`12`**, not 11 — `beads_ledger` was added by
+  commit `fdfd6ce` (Phase P / `fkm.1.1`, the bd 1.1.2 migration).
+  **HISTORICAL, pinned to this block's own HEAD (`261e09e`) — a session
+  running this command today gets `13`, not `12`: `model_parity`
+  (claude-workflow-plugin-a13r) landed after this measurement and took the
+  registry to thirteen. The `12`/`fdfd6ce` narrative and the NOT-MET finding
+  below are the recorded 2026-09-18 checkout state, not a live target to
+  reproduce.** Then run
+  `bash install.sh --verify; echo "exit=$?"` (capture `$?` directly — piping
+  the output through another command loses it) and read the summary line.
+  **NOT MET as of this measurement, and this is NOT rounded up to a pass**:
+  this checkout currently reads
+  `workflow-doctor: 12 check(s) — 11 passed, 1 failed, 0 skipped` and
+  `exit=1`. Independently reproduced on the same tree: a second run read
+  the same verdict with the database count moved 536 -> 538 (the live store
+  growing between runs, not flakiness — the divergence itself is what
+  reproduces, not the exact figure). The one failure is `beads_ledger`: the
+  on-disk `.beads/issues.jsonl` (442 records) and the live `bd` database
+  disagree with no provable direction.
+  **Three facts establish this is dev-checkout state, not shipped-artifact
+  behaviour — checked live, not assumed:**
+  1. `workflow-doctor.sh`'s own header (`:272`, `:291`) states every dynamic
+     check EXCEPT `beads` and `beads_ledger` runs against a throwaway
+     sandbox copy; those two deliberately read the REAL target's database
+     (`beads_ledger` explicitly because "a sandboxed copy would answer for
+     the wrong ledger").
+  2. `.beads/` is not shipped/manifested surface: run
+     `grep -c '\.beads/' manifests/v4.1.0.sha256` and confirm `0`.
+  3. Ledger and database start in agreement BY CONSTRUCTION on both paths
+     that create them: a genuinely fresh install with no pre-existing
+     `.beads/` runs `bd init --quiet` into an empty directory
+     (`install.sh:2971-2974`), trivially in sync; the separate
+     bd-binary-version-upgrade repair path rebuilds the database FROM the
+     ledger via `bd bootstrap` when the two disagree (`install.sh:610-622`,
+     "Step 4 — ALREADY-INSTALLED PATH"). Divergence is therefore only
+     reachable after a checkout has been worked in, which is exactly this
+     repository's own state.
+  This is a live-store-vs-export condition this repo's own `CLAUDE.md`
+  already documents ("the live store is always ahead of the export") and is
+  gated behind `claude-workflow-plugin-0rbi` (open) plus the
+  `.beads/quarantine.tsv` contamination it names (5 data rows, checked live
+  via `tail -n +2 .beads/quarantine.tsv | wc -l` — `claude-workflow-plugin-ofd`
+  alone carries 10,123 comments matching `text LIKE 'MODEL SWITCH%'`) —
+  reconciling blind is explicitly the wrong move per `CLAUDE.md`'s own
+  standing instruction (`beads-ledger.sh reconcile --apply` would import the
+  ledger and re-export the union into that git-tracked file, writing the
+  quarantined contamination in permanently), not an oversight of this piece.
+  **Expect `12/12`, exit `0`, once `0rbi` lands and
+  `bash .claude/scripts/beads-ledger.sh reconcile --apply` has run**
+  — **HISTORICAL, pinned to this block's own HEAD (`261e09e`): the registry
+  has since grown to `13` (`model_parity`, claude-workflow-plugin-a13r), so
+  the current expectation is `13/13`, not `12/12`.** And correct the plan's
+  own "11/11" gate line to "13/13" regardless, since that correction is
+  owed independent of the ledger reconciling. **Until then, `install.sh
+  --verify` does not pass on this tree — full stop, not a caveat that
+  changes the exit code.**
+- assert: **a genuinely fresh v4.1.0 -> v5.0.0 upgrade, on its own
+  disposable target, is a different measurement from the one above and does
+  not change it.** LIVE-1 (`fkm.9`, run 2026-09-19 — a day after the rest of
+  this block) installed v4.1.0 from the tag into a scratch target, edited
+  one operator file, upgraded with THIS checkout's installer, then ran
+  `install.sh --verify` twice (once before, once after `npm ci --omit=dev`
+  in both MCP server dirs). Both runs read
+  `workflow-doctor: 12 check(s) — 12 passed, 0 failed, 0 skipped` and
+  `exit=0` (byte-identical logs; exit codes captured directly as
+  `exit-code:0` both times). **MET, but read the next sentence before
+  treating this as good news about `beads_ledger` as a check**: the scratch
+  target carried ZERO Beads records on either side of the comparison it
+  passed — `bd export` on the target wrote an empty file and
+  `.beads/issues.jsonl` does not exist there at all — so the pass is between
+  two empty sets. It shows install-and-upgrade do not themselves CREATE
+  ledger drift; it says nothing about a target that goes on to accumulate
+  real history the way this very checkout has. **The assertion above stands
+  exactly as written: on THIS tree, `install.sh --verify` does not pass,
+  full stop.** Full measurement, predictions and both wrinkles:
+  `docs/RELEASE_AUDIT.md` `DP18`, with the LIVE-1 addendum folded into
+  `DP16` and `DP15` in the same file.
+- assert: `make lint` is clean AND actually ran (same zero-bytes-vs-skip
+  distinction every prior release's block uses — the recipe exits 0 on skip
+  too). Run `make lint > /tmp/lint.out 2>&1; echo $?` and confirm `0` with
+  `wc -c < /tmp/lint.out` equal to `0`; confirm `command -v shellcheck`
+  resolves (`0.11.0` on the authoring host). **MET** (checked live,
+  2026-09-18).
+- assert: **the v5.0.0 manifest now EXISTS.** Run `ls manifests/` and
+  confirm three files: `v3.5.0.sha256`, `v4.1.0.sha256`, `v5.0.0.sha256`.
+  **MET as of 2026-09-19** (checked live; `git status --porcelain --
+  manifests/` shows it `??` — untracked, generated after the version bump
+  and the surface changes this piece's own edits contributed, matching the
+  sequencing the plan specified at `docs/plans/v5-design-phase-plan.md:763-766`).
+  **Byte-reproducibility from a tagged v5.0.0 checkout — the `UW1`-style check
+  for THIS release, CLOSED (`claude-workflow-plugin-h2zz` round 11):** this
+  bullet used to say neither half below was asserted; the first half now is.
+  Run `make verify-release` (pre-push, against the LOCAL `v5.0.0` tag this
+  whole section is about — not yet pushed to origin) and confirm the last line
+  reads `OK -- manifests/v5.0.0.sha256 reproduces byte-for-byte from v5.0.0
+  (138 rows)` with exit `0`. **MET as of 2026-09-25** (checked live, HEAD
+  `569174e`; the identical script runs automatically post-push, on every real
+  `v*` tag push, via `.github/workflows/release-verify.yml` — see
+  `.claude/scripts/verify-release-manifest.sh`'s own header for why both
+  contexts share one script rather than two implementations of the claim).
+  **What remains open, unrelated to this fix:** that any `--upgrade` run has
+  actually classified against THIS table — LIVE-1 (`docs/RELEASE_AUDIT.md`
+  `DP15`/`DP18`) upgraded a v4.1.0 target using that target's OWN
+  install-manifest as the old table, never touching this file.
+- assert: **`v4.1.0` is unmoved, and its manifest still reproduces from the
+  tag's own tree** — this is the one condition this section is explicitly
+  required to carry forward from every prior release, now re-verified
+  against a repo that has moved 90+ commits since. Run `git rev-list -n1
+  v4.1.0` and confirm `57fb88867bb13caa8b345497e4d0bae6c5f56acb` (short form
+  `57fb888`). **Note for whoever re-runs this: `git rev-parse v4.1.0` alone
+  is NOT the same command** — `v4.1.0` is an ANNOTATED tag
+  (`git cat-file -t v4.1.0` → `tag`), so a bare `rev-parse` returns the tag
+  *object's* own hash, not the commit; `rev-list -n1` (or `rev-parse
+  v4.1.0^{commit}`) dereferences it. Then run
+  `T=$(mktemp -d) && git archive v4.1.0 | tar -x -C "$T" && bash
+  .claude/scripts/workflow-manifest.sh generate "$T" | cmp -
+  manifests/v4.1.0.sha256` and confirm `cmp` is silent with exit `0`.
+  **MET** (both checked live, 2026-09-18 — the tag has not moved and its
+  frozen manifest still reproduces byte-for-byte from its own tree).
+- assert: v5 ships no Linear integration, and no shipped doc asserts
+  otherwise. Run `ls docs/specs/ 2>&1` and confirm "No such file or
+  directory" (the repo-fallback path is the only design-artifact path and
+  has never been exercised against a connected workspace); run
+  `grep -c 'v5 ships no Linear integration' CHANGELOG.md` and confirm
+  `>= 1`; run `grep -c 'The Linear adapter ships unproven' CHANGELOG.md`
+  and confirm `0` (the withdrawn sentence must not still be sitting
+  alongside its replacement). **MET as a disclosure, but read the next
+  sentence before treating this as the same disclosure the block below once
+  described: the claim underneath it changed on 2026-09-28**
+  (`claude-workflow-plugin-qttq`, F5 of the operator's finishing-pass
+  brief). Correction 4's original decision was to ship an unproven adapter
+  and disclose that plainly; F4/F5 measured that no adapter exists at all —
+  `grep -rn DESIGN_STORE .claude/scripts/*.sh` returns zero hits, re-run
+  live 2026-09-28 — so there was nothing left to disclose as unproven, and
+  the CHANGELOG sentence was rewritten rather than carried forward.
+  `docs/RELEASE_AUDIT.md` `DP17` moved from NOT-PROVEN to REMOVED in the
+  same change set; see the tally assert above, now corrected to read
+  `11 / 6 / 0 / 1`.
+  Two more mechanisms for this SAME underlying invariant landed WHILE this
+  HANDOFF section was being written (a sibling D7 piece, not this one), and
+  were then narrowed under two rounds of independent, non-Claude review
+  (sol-codex) before this section's own correction pass on 2026-09-19 —
+  read them as a TRIPWIRE plus a scoped BEHAVIOURAL test, never as a
+  completeness proof; their own file headers say so explicitly, in exactly
+  those words, and BOTH GUARDS SHIP UNCHANGED IN FUNCTION after F5 — only
+  their header framing moved, from guarding an unproven claim to asserting
+  the claim's absence.
+  **CORRECTION: a prior draft of this section verified the L1 half with
+  `grep -icE 'DESIGN_STORE.*linear|linear.*design.store'
+  .claude/scripts/qa-gate.sh .claude/scripts/verify-before-stop.sh
+  .claude/scripts/review-check.sh` and treated `0` as confirming the guard.
+  That two-pattern grep is narrower than, and was never, the shipped
+  detector — do not use it.** Run the shipped L1 spec directly instead:
+  `test -f .claude/scripts/tests/design-structural.test.sh && bash
+  .claude/scripts/tests/design-structural.test.sh` and confirm the last
+  line reads `PASSED: 33 assertion(s)` with exit `0` (offline, no `bd`
+  dependency, safe to run standalone; re-confirmed live 2026-09-28, still
+  33/33 after F5's header-only edit to this file — no detection logic or
+  assertion changed). This asserts `qa-gate.sh`,
+  `verify-before-stop.sh` and `review-check.sh` contain none of three
+  tracked literal spellings (`DESIGN_STORE`, capitalised `Linear`,
+  comment-stripped bare lowercase `linear`) — two rounds of independent
+  review found the original single-pattern version bypassed (a natural
+  `case`-arm on a prefix-stripped external ref, then case-folding and
+  quote-reassembly against the three-signal redesign) and established that
+  no lexical grep over a fixed three-file list can be hardened into a
+  completeness proof, because a gate could source a helper file this guard
+  never scans. For the L2 half, run `find . -iname 'design-degradation*'
+  -not -path '*/node_modules/*'` and confirm it returns
+  `./.claude/tests/component/specs/design-degradation.sh` — this spec
+  proves the `review-record`/`review-check` gate sequence produces
+  byte-identical stdout with `DESIGN_STORE=linear` set versus explicitly
+  unset, genuinely behavioural (it drives the real gate scripts end-to-end
+  against a live Beads fixture) but scoped to that one sequence; it is not
+  re-run here (it writes a Beads task, and this checklist stays read-only).
+  Neither mechanism is the same claim as Linear working, and neither is why
+  `DP17` changed status — it changed because F4/F5 found no adapter to
+  validate, not because either guard passed or failed.
+- assert: on-disk counts match what the docs will claim once the rewrite
+  piece lands. Run `ls .claude/agents/*.md | wc -l` → `9`; run
+  `ls .claude/rubrics/*.md | wc -l` → `6` (the new `design.md` rubric, up
+  from v4.1.0's 5); run `ls .claude/scripts/*.sh | wc -l` for the current
+  script count (not pinned here — several Phase P tasks added scripts this
+  arc; whoever re-runs this should compare against the docs-rewrite piece's
+  own README table rather than a number frozen here). **Agents and rubrics
+  MET; script-count parity is the docs-rewrite piece's condition, not
+  restated here.**
+
+**Remaining before the tag:** the version/manifest piece (`manifests/v5.0.0.sha256`
+generation + regenerate-and-`cmp`), the docs-rewrite piece
+(`docs/WORKFLOW.md`, `docs/ARCHITECTURE.md`, `docs/AGENTS.md`, `docs/HOOKS.md`,
+`README.md`), the live-validations piece (LIVE-1/LIVE-2 execution and
+recording; LIVE-3 stays NOT RUN by design), and reconciling the
+`beads_ledger` doctor check via `claude-workflow-plugin-0rbi`. This piece
+performs none of those and makes no commit, no tag, and no approval — per
+the standing convention, the orchestrator applies the tag once every D7
+piece has landed and been reviewed.
+
 ## Verify conditions for "v4.1.0 (the verifiable install) shipped"
 
 Every number below was measured on **2026-07-30** by
@@ -362,33 +652,87 @@ every command here.
     `awk '/^## v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
     → confirm `14 / 0 / 0 / 0`, row-ids `14`.
   - v4.1.0 ledger →
-    `awk '/^## v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
+    `awk '/^## v4\.1\.0 claims ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md | grep -cE '\| PROVEN \|$'`
     and siblings → confirm `13 / 3 / 0 / 0`, and
     `grep -cE '^\| UW[0-9]+ \|'` over the same range → `16`.
+    **RE-SCOPED 2026-09-18 (`claude-workflow-plugin-fkm.9`), counts
+    unchanged.** This range used to end at `,0` — end-of-file — which was
+    right only while v4.1.0 was the last claims-ledger section. A fourth
+    ledger (`v5.0.0`) now sits below it, so the open-ended form would have
+    silently folded its rows into v4.1.0's counts (17 at this ledger's
+    2026-09-18 compilation; 18 as of 2026-09-19, after `DP18`). Same correction,
+    same reason, as the v3.5.0 → v4.0.0 and v4.0.0 → v4.1.0 ones above and
+    below.
   - assert the trap is still closed: the v4.0.0 range must NOT end at `,0`.
     Run `grep -cF 'v4\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md` and
     confirm `0`; run
     `grep -cF 'v4\.0\.0 claims ledger/,/^## v4\.1\.0 claims ledger/' docs/RELEASE_AUDIT.md`
-    and confirm `5` (all five ranges bounded). **Positive control, so the
-    zero above is not vacuous:**
-    `grep -cF 'v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md` → `5` — the
-    grep CAN find this shape, and those five are v4.1.0's own ranges, which
-    end at `,0` legitimately because v4.1.0 is currently the last section.
-    With the open-ended form the v4.0.0 range returns `27 / 3` instead of
-    `14 / 0`, which is measured, not hypothetical.
+    and confirm `5` (all five ranges bounded).
+  - assert the trap is closed a second time, at the section that used to be
+    exempt: the v4.1.0 range must NOT end at `,0` either, now that v5.0.0
+    exists. Run `grep -cF 'v4\.1\.0 claims ledger/,0' docs/RELEASE_AUDIT.md`
+    and confirm `0` — this is the exact string that was `5` (and cited as a
+    *positive* control) before the v5.0.0 ledger landed; run
+    `grep -cF 'v4\.1\.0 claims ledger/,/^## v5\.0\.0 claims ledger/' docs/RELEASE_AUDIT.md`
+    and confirm `5` (all five ranges re-bounded to the new last ledger).
+    **Positive control, so the zero above is not vacuous:**
+    `grep -cF 'v5\.0\.0 claims ledger/,0' docs/RELEASE_AUDIT.md` → `5` — the
+    grep CAN find this shape, and those five are v5.0.0's own ranges, which
+    end at `,0` legitimately because v5.0.0 is currently the last
+    claims-ledger section (`## Standing attestations` follows it but carries
+    no status cells and no `| V<n> |`-shaped rows, so it does not count as a
+    ledger for this purpose). With the open-ended form the v4.1.0 range
+    would return `24 / 9 / 1 / 0` instead of `13 / 3 / 0 / 0`, which is
+    measured against the shipped v5.0.0 section as it stands after `DP18`
+    (2026-09-19; it read `24 / 8 / 1 / 0` against the 17-row section at this
+    block's original 2026-09-18 measurement), not hypothetical. This is
+    the third time this exact correction has been paid (v3.5.0 → v4.0.0,
+    v4.0.0 → v4.1.0, and now v4.1.0 → v5.0.0) and RELEASE_AUDIT.md's own
+    tally block carries the standing instruction to whoever appends a fifth
+    ledger next.
 - assert: a stock 4.1.0 target classifies against its OWN hashes. Run
   `ls manifests/` and confirm both `v3.5.0.sha256` and `v4.1.0.sha256` are
   present. `install.sh:1315-1322` falls back to `manifests/v3.5.0.sha256`
   when a target has no `install-manifest` and no table matches its detected
   version, so without this file every unchanged 4.1 file would be classified
   against v3.5's hashes and reported as customized.
-- assert: the v4.1.0 manifest is byte-reproducible. Run
-  `bash .claude/scripts/workflow-manifest.sh generate . > /tmp/m1 && cmp /tmp/m1 manifests/v4.1.0.sha256`
+- assert: the v4.1.0 manifest is byte-reproducible **from the tree of the tag it
+  names**. Run
+  `T=$(mktemp -d) && git archive v4.1.0 | tar -x -C "$T" && bash .claude/scripts/workflow-manifest.sh generate "$T" > /tmp/m1 && cmp /tmp/m1 manifests/v4.1.0.sha256`
   and confirm `cmp` is silent with exit `0`, and
   `wc -l < manifests/v4.1.0.sha256` → `132` (119 `workflow` + 11 `operator` +
   2 `merged`; the frozen `v3.5.0.sha256` is `117`). Determinism is load-bearing: the
   generator may embed no timestamp, hostname, locale-dependent sort or
   unordered glob, and this comparison is what enforces that.
+  **Against the TAG, never against `.`.** This line used to read `generate .`,
+  which compares a LIVE WORKING TREE against a table frozen at the release
+  commit `57fb888` — red by construction, and red on a load-bearing determinism
+  assert with nothing to tell stale-table drift from a broken generator.
+  Measured 2026-08-07 at `1a3d59b`: **73 differing lines**, from 36 rows whose
+  hash moved after the freeze plus `.claude/scripts/beads-ledger.sh`, which did
+  not exist at the tag. That is expected drift. The table is correct for the
+  tree it names, and the tag is not moving
+  (`docs/plans/v5-design-phase.md`, correction-layer decision 2).
+  **Do not "fix" a red here by regenerating the table.** A `v4.1.0.sha256`
+  regenerated at HEAD no longer describes v4.1.0's tree, so an operator
+  upgrading from a real v4.1.0 install matches neither the new source nor the
+  recorded oldhash on any drifted row, lands on `preserve-custom`
+  (`workflow-manifest.sh:490-503`) and collects `.new` sidecars for files they
+  never touched — the defect class `016` closed, reintroduced from the other
+  side. Regenerate at the D7 refreeze, against the tag that release actually
+  ships. *[SUPERSEDED (`claude-workflow-plugin-h2zz` round 11) — this used to
+  be automated as `.claude/scripts/tests/workflow-manifest.test.sh` Section 6,
+  which ran this comparison on every L1 run and printed a `note:` skip rather
+  than a failure when that tag or table was not in the checkout
+  (`claude-workflow-plugin-ce5`). Section 6 was REMOVED under the h2zz round-4
+  waiver ruling: the claim cannot hold on a pre-release ref, by definition, and
+  no per-file L1 exemption narrow enough survived six findings across four
+  independent-review rounds (see `.claude/scripts/verify-release-manifest.sh`'s
+  own header for the full account). The claim lives there now instead — run
+  pre-push, against a deliberately-local tag, via `make verify-release`; and
+  enforced post-push, on every real `v*` tag push, by
+  `.github/workflows/release-verify.yml`. It no longer runs inside L1, and
+  prints no `note:` skip.]*
 - assert: there are exactly TWO `SKILL.md` files in the plugin's own surface —
   one registered skill and one vendored reference. Run
   `find .claude -name SKILL.md -not -path '*/node_modules/*' -not -path '*/tests/e2e/*' | wc -l`

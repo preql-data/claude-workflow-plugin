@@ -1,0 +1,50 @@
+{
+  "contract_version": "1",
+  "task_id": "claude-workflow-plugin-rqer",
+  "reviewer_identity": "qa-claude",
+  "reviewer_model": "claude-fable-5",
+  "reviewer_pin": "claude-fable-5",
+  "reviewed_hash": "f5fd255f46e0c3a404a2015dff9d63cc087e1563129f4ce7828facf80574cb95",
+  "risk_threshold": "high",
+  "stop_condition": "every AC of the corrected rqer fix spec (AC-1..AC-6) is traced to a passing paired check, and no high-severity finding remains in the review-artifact write/record/approve path",
+  "verdict": "findings",
+  "findings": [
+    {
+      "id": "R1-F1",
+      "severity": "high",
+      "location": ".claude/scripts/codex-review.sh:530",
+      "evidence": "Drove the SHIPPED driver (stub MCP server, isolated fixture, worktree at 9488c69+dirty) with a directory pre-placed at the derived path docs/reviews/dirprobe-r1.json: driver exited 0, printed the canonical path on stdout, and the artifact bytes landed INSIDE the directory as dirprobe-r1.json.tmp.<pid> — no file at the printed path. Plain-shell control: mv <file> <existing-dir> returns rc=0 on this platform (Darwin 25.3.0), so the checked-mv cannot fire for this shape.",
+      "description": "The CHECKED-mv comment claims the reproduced pre-existing-directory silent-drop shape is closed (discarded mv exit status ... so a target that pre-existed as a directory ... Checked now). mv into an existing directory SUCCEEDS, so checking its exit status closes only the disk-full/permission arms; the directory shape still prints a path and exits 0 with the paid Sol artifact stranded. qa-gate.sh review-record refuses artifact_path_is_directory downstream (fail closed for the record), but the driver misreports success in exactly the shape its own comment declares fixed. Fix: add the -d refusal or a [ -f ART_FILE ] post-check (the audit recipe named both) and correct the comment; the completion record decisions text (a full disk or a permissions error) is the accurate scope."
+    },
+    {
+      "id": "R1-F2",
+      "severity": "high",
+      "location": ".claude/tests/e2e/fixtures/*/.claude/scripts/codex-review.sh:49",
+      "evidence": "cd .claude/tests/e2e && npx vitest run specs/_fixture-script-sync.unit.spec.ts -> Tests 7 failed | 182 passed: all seven fixture codex-review.sh copies DRIFTED from canonical (each retains the dead QA_TRACKING_DIR= line root removed; otherwise identical). Drift existed at base 9488c69 (nq5f edits never synced: base canonical sha 9f0da321..., base fixture sha 52b89310...), so the failure is inherited, not introduced — but this task edited all 7 copies, declares them in files_changed, and stopped one line short of green.",
+      "description": "The shipped fixture-sync drift guard (l3-vitest-unit, part of make test-ci via test-e2e-unit) is red on files this change set touched and claims. make sync-fixtures (or deleting the one dead line in 7 copies) heals it; re-run the guard green before approve."
+    },
+    {
+      "id": "R1-F3",
+      "severity": "medium",
+      "location": ".claude/scripts/qa-gate.sh:4805 and .claude/scripts/codex-review.sh:513",
+      "evidence": "Both new comments state the driver-path/derivation byte-for-byte contract is pinned against drift by review-artifact-durability.sh Leg A, which asserts the driver own printed path against the literal expected string. grep of review-artifact-durability.sh: zero invocations of codex-review.sh; Leg A drives the claude lane (review-record via stdin) only. The actual pin is component/specs/codex-review.sh (art_path helper + [ -f ] assertions at C4/C5/C8).",
+      "description": "A false citation of the enforcing spec, in two shipped files, for a load-bearing anti-drift guarantee. The fkm.3 lesson ledger records this defect class (comment crediting the wrong mechanism) shipping a live hole. Fix: cite component/specs/codex-review.sh, or extend durability Leg A to actually drive the driver once."
+    },
+    {
+      "id": "R1-F4",
+      "severity": "medium",
+      "location": ".claude/tests/component/specs/approve-idempotency.sh:196-197",
+      "evidence": "Two leftover echo DEBUG A0 lines to stderr; the second pipes a Stop payload through the fixture verify-before-stop.sh UNASSERTED before A0 asserts. On the expected ALLOW path that unasserted run truncates the tracker and clears current-task, so the asserted stop_decision that follows measures the post-release trivial-allow arm, not the matching-approval-releases arm its label claims.",
+      "description": "Shipped debug scaffolding that changes what the control measures (discriminating power survives indirectly, since a BLOCK would persist state and still fail the assert). Delete both lines and re-run the spec."
+    },
+    {
+      "id": "R1-F5",
+      "severity": "low",
+      "location": ".claude/scripts/qa-gate.sh:4928 vs :5049",
+      "evidence": "cmd_review_record with --file in the repo-relative spelling reads the artifact via cat -- <relative> (CWD-relative) for validation and grammar extraction, but hashes the absolute $derived; with CWD != PROJECT_DIR and files at both spellings, the validated/extracted bytes and the hashed bytes diverge.",
+      "description": "Self-inflicted-only edge (both files authored by the same actor; no privilege boundary), but the record verdict fields can describe different bytes than artifact_hash names. Resolve input_path against PROJECT_DIR before reading, or read raw from $derived after the derivation check."
+    }
+  ],
+  "iterations": 1,
+  "stopped_by": "verdict"
+}
