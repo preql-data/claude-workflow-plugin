@@ -2035,15 +2035,36 @@ weight actually sits.
   | reviewer | qa, grader, judge | `claude-opus-5` | `claude-opus-5-5` |
   | implementer | backend, frontend, devops | `claude-sonnet-5` | `claude-sonnet-5-5` |
 
-  The implementer change also moves `env.CLAUDE_LATEST_OPUS`. The automatic
-  resolver could not make this move by itself: its cached model listing dates
-  from 2026-07-25, and it reported that listing as `api`
+  The implementer change also moves `env.CLAUDE_LATEST_OPUS`. On the
+  maintainers' host the automatic resolver could not make this move: its
+  cached model listing was stale, and it reported that listing as `api`
   (`claude-workflow-plugin-rk9y`).
 
-  The optional Sol lane stays on `gpt-5.6-sol`. GPT-6 Sol is offered only by
-  Codex CLI 0.154.0 and later, and 0.154.0 removed the `codex mcp-server`
-  subcommand the lane runs on. `docs/CODEX_SETUP.md` now pins the CLI to
-  0.145.0 and records the measurement. Moving the lane to a new transport is
+  **If your host's model-select cache predates these ids, do not apply the
+  drift fixes it suggests.** The cache refreshes only when `ANTHROPIC_API_KEY`
+  is set. A stale cache makes three things report these pins as drift:
+  - the session-start check;
+  - the statusline;
+  - workflow-doctor's `model_parity`.
+
+  Each one suggests `/workflow-model` commands that would DOWNGRADE the pins.
+  Clear the stale state in either of two ways:
+  - refresh the listing and the resolved mapping, without touching any pin,
+    with `bash .claude/scripts/model-select.sh apply --check --refresh`
+    (needs the key);
+  - or delete `.claude/.qa-tracking/model-select-cache.json` and
+    `.claude/.qa-tracking/model-roles-resolved.json`. With no cache, the checks
+    skip instead.
+
+  The optional Sol lane stays on `gpt-5.6-sol`. Measured on a ChatGPT-plan
+  login:
+  - neither `codex mcp-server` CLI measured, 0.145.0 or 0.153.4, is offered
+    GPT-6 Sol;
+  - 0.160.0 offers it, but 0.154.0 removed the `codex mcp-server` subcommand
+    the lane runs on.
+
+  `docs/CODEX_SETUP.md` now pins the CLI to 0.145.0 and records the
+  measurement. Moving the lane to a new transport is
   `claude-workflow-plugin-xjf2`.
 - **`docs/specs/*.md` is now a GOVERNING ARTIFACT, so a design document no
   longer takes the F1 doc-only fast path** (`fkm.3`, closing the residual
