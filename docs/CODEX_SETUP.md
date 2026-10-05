@@ -10,6 +10,17 @@
 > its tool names or schema across minor versions. If you change this file, re-run the verification
 > steps and re-check the live docs first.
 
+> **2026-10-05: Codex CLI 0.154.0 removed `codex mcp-server`, so pin the CLI.** This lane runs on
+> `codex mcp-server`. `codex --help` lists that subcommand through **0.153.4** and not from
+> **0.154.0** on (also absent in 0.155.x, 0.157.1, 0.159.3 and 0.160.0, the newest release that day).
+> On 0.160.0, `codex mcp-server` is read as a prompt for the interactive CLI and exits
+> `Error: stdin is not a terminal`, so `codex-detect.sh` reports `handshake-failed` and every review
+> falls back to the Claude lane. [§2](#2-install-the-codex-cli) therefore pins the install to 0.145.0,
+> the version this page was verified on. The same cut keeps GPT-6 Sol out of this lane's reach — see
+> [GPT-6 Sol cannot reach this lane yet](#gpt-6-sol-cannot-reach-this-lane-yet). Measured on
+> claude-workflow-plugin-786x; moving the lane to a transport the current CLI ships is
+> claude-workflow-plugin-xjf2.
+
 ---
 
 ## 1. What this is, and why it is optional
@@ -44,30 +55,22 @@ account. Skip it otherwise; you lose no functionality.
 
 ## 2. Install the Codex CLI
 
-Pick one. All three install the same binary.
+Install **0.145.0**, pinned, with npm (macOS, Linux and Windows alike):
 
 ```bash
-# npm
-npm install -g @openai/codex
-
-# Homebrew
-brew install --cask codex
-
-# curl installer (macOS / Linux)
-curl -fsSL https://chatgpt.com/codex/install.sh | sh
+npm install -g @openai/codex@0.145.0
 ```
 
-Windows (PowerShell):
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
-```
+Do not use the Homebrew cask (`brew install --cask codex`) or the curl / PowerShell installers
+(`chatgpt.com/codex/install.sh`, `install.ps1`) for this lane for now. They install the newest
+release, and from 0.154.0 on that release has no `codex mcp-server` (see the note at the top of this
+page). The unpinned `npm install -g @openai/codex` does the same.
 
 Confirm it is on your `PATH` — the plugin spawns `codex` by name, so a binary that only works
 inside your shell's aliases will not be found:
 
 ```bash
-command -v codex && codex --version     # expect: codex-cli 0.145.0 (or newer)
+command -v codex && codex --version     # expect: codex-cli 0.145.0 (0.154.0 or later has no mcp-server)
 ```
 
 ---
@@ -408,6 +411,22 @@ the single most likely reason a correctly-registered lane still fails: the regis
 *not* mask it, and on a ChatGPT-account login that particular slug is rejected by the backend
 outright. This is exactly what broke the first live Sol turn during the v4.0.0 validation — see
 [The model pin lives in `config.toml`](#the-model-pin-lives-in-configtoml-not-in-the-registration).
+
+### GPT-6 Sol cannot reach this lane yet
+
+Measured 2026-10-05 on a ChatGPT-plan login (claude-workflow-plugin-786x). The newest Sol,
+`gpt-6.1-sol` (and `gpt-6-sol` before it), is offered only by CLIs that no longer have `mcp-server`:
+
+| Codex CLI | `codex mcp-server` | GPT-6 Sol in `codex debug models` |
+| --- | --- | --- |
+| 0.145.0 (the pin in §2) | yes | no — the head of the catalog is `gpt-5.6-sol` |
+| 0.153.4 (the last with `mcp-server`) | yes | no — `gpt-6-astra` is listed, neither Sol 6 slug is |
+| 0.160.0 | no | yes — `gpt-6.1-sol` and `gpt-6-sol` |
+
+Forcing the slug does not help. On 0.145.0, `codex exec -m gpt-6.1-sol` fails with HTTP 400:
+`The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account.` So the sweep
+above still resolves `gpt-5.6-sol`, and that stays the pin until the lane moves off `mcp-server`
+(claude-workflow-plugin-xjf2). An API-key login was not measured.
 
 ### Why this sweep is not automated
 

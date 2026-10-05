@@ -11,7 +11,7 @@ tools: Read, Grep, Glob, LS
 # decides who is ENGAGED (Sol via Codex when present, Claude otherwise); it
 # never changes this line. That split is the same one `reviewer_lane` has
 # carried since v4.0.0 / V2.
-model: claude-fable-5
+model: claude-fable-5-1
 # effort: spec 0.4 sets the per-agent effort to the highest level the model
 # supports. The session-level effort (launch wiring — `make session` /
 # `claude --effort` — or /effort) takes precedence per session; this

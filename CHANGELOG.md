@@ -2023,6 +2023,28 @@ weight actually sits.
 
 ### Changed
 
+- **Model lanes upgraded to the newest Claude versions**
+  (`claude-workflow-plugin-786x`, operator-directed 2026-10-05). The pins were
+  applied with `workflow-model-apply.sh --role`, the sanctioned path. The
+  strategies in `.claude/model-roles` are unchanged.
+
+  | Lane | Agents | Old pin | New pin |
+  | --- | --- | --- | --- |
+  | designer, design_reviewer | designer, design-reviewer | `claude-fable-5` | `claude-fable-5-1` |
+  | orchestrator | orchestrator | `claude-opus-5` | `claude-opus-5-5` |
+  | reviewer | qa, grader, judge | `claude-opus-5` | `claude-opus-5-5` |
+  | implementer | backend, frontend, devops | `claude-sonnet-5` | `claude-sonnet-5-5` |
+
+  The implementer change also moves `env.CLAUDE_LATEST_OPUS`. The automatic
+  resolver could not make this move by itself: its cached model listing dates
+  from 2026-07-25, and it reported that listing as `api`
+  (`claude-workflow-plugin-rk9y`).
+
+  The optional Sol lane stays on `gpt-5.6-sol`. GPT-6 Sol is offered only by
+  Codex CLI 0.154.0 and later, and 0.154.0 removed the `codex mcp-server`
+  subcommand the lane runs on. `docs/CODEX_SETUP.md` now pins the CLI to
+  0.145.0 and records the measurement. Moving the lane to a new transport is
+  `claude-workflow-plugin-xjf2`.
 - **`docs/specs/*.md` is now a GOVERNING ARTIFACT, so a design document no
   longer takes the F1 doc-only fast path** (`fkm.3`, closing the residual
   `s5qf` disclosed and two shipped tests pinned). Before this, a change set
